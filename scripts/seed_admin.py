@@ -66,6 +66,9 @@ def main():
             password_hash=hash_password(password),
             nombre=nombre,
             is_admin=True,
+            portal_admin=True,
+            # Para admin del portal no aplicamos expiración del dashboard.
+            dashboard_access_until=None,
         )
         db.add(user)
         db.commit()

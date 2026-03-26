@@ -19,6 +19,7 @@ logging.basicConfig(
 
 DBC_DIR = os.environ.get("DBC_DIR", r"C:\RestBar\DBC")
 SUCURSAL_NOMBRE = os.environ.get("SUCURSAL_NOMBRE", "SUC_PRUEBA").strip()
+SUCURSAL_PASSWORD = os.environ.get("SUCURSAL_PASSWORD", "").strip()
 SYNC_API_URL = os.environ.get("SYNC_API_URL", "http://127.0.0.1:8000").rstrip("/")
 SYNC_API_KEY = os.environ.get("SYNC_API_KEY", "").strip()
 CHECKPOINT_PATH = os.environ.get("SYNC_CHECKPOINT_PATH", "sync_checkpoint.json")
@@ -158,6 +159,8 @@ def upload_historial(rows: List[dict]) -> dict:
     headers = {"Content-Type": "application/json"}
     if SYNC_API_KEY:
         headers["X-API-Key"] = SYNC_API_KEY
+    if SUCURSAL_PASSWORD:
+        headers["X-Sucursal-Password"] = SUCURSAL_PASSWORD
 
     total_new = 0
     errores = 0
@@ -174,6 +177,8 @@ def upload_historial(rows: List[dict]) -> dict:
 
 def run_once() -> None:
     logging.info("Agente sync — sucursal=%s API=%s", SUCURSAL_NOMBRE, SYNC_API_URL)
+    if not SUCURSAL_PASSWORD:
+        logging.warning("SUCURSAL_PASSWORD no está configurado. La subida a /sync/upload fallará.")
     last = load_checkpoint()
     tarjetas_map = get_tarjetas_map()
     historical_sales = process_historical(tarjetas_map, last)

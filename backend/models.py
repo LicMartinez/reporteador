@@ -16,7 +16,19 @@ class Usuario(Base):
     email = Column(String, unique=True, index=True, nullable=False)
     password_hash = Column(String, nullable=False)
     nombre = Column(String)
+    # Admin del dashboard (vista global). Históricamente usado en el MVP.
     is_admin = Column(Boolean, default=False)
+
+    # Admin del portal Swiss Tools Dashboard Admon.
+    portal_admin = Column(Boolean, default=False)
+
+    # Expiración del acceso al dashboard para usuarios estándar (no portal_admin).
+    dashboard_access_until = Column(DateTime, nullable=True)
+    last_dashboard_access_at = Column(DateTime, nullable=True)
+
+    # Catálogo maestro asignado para fuzzy/mapeo de productos.
+    catalogo_maestro_id = Column(String, ForeignKey("catalogos_maestros.id"), nullable=True)
+    catalogo_maestro = relationship("CatalogoMaestro", back_populates="usuarios")
     
     # Mapeo Multi-Inquilino (Multi-Tenant Access)
     sucursales_acceso = relationship("UsuarioSucursal", back_populates="usuario")
@@ -28,10 +40,52 @@ class Sucursal(Base):
     nombre = Column(String, unique=True, index=True, nullable=False) # ej: BAR_LOVE, SUC_PRUEBA
     sync_paused = Column(Boolean, default=False)
     ultimo_checkpoint_historico = Column(DateTime, nullable=True) # Para Tracker Incremental
+
+    # Credencial para el agent de sincronización (validar quién puede subir datos).
+    sync_password_hash = Column(String, nullable=True)
+    last_connection_at = Column(DateTime, nullable=True)
     
     ventas = relationship("Venta", back_populates="sucursal")
     logs = relationship("LogSync", back_populates="sucursal")
     usuarios_acceso = relationship("UsuarioSucursal", back_populates="sucursal")
+
+
+class CatalogoMaestro(Base):
+    __tablename__ = "catalogos_maestros"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    nombre = Column(String, unique=True, nullable=False)
+
+    # Relación con usuarios que usan este catálogo
+    usuarios = relationship("Usuario", back_populates="catalogo_maestro")
+
+    sucursales_comparten = relationship(
+        "CatalogoMaestroSucursal", back_populates="catalogo", cascade="all, delete-orphan"
+    )
+
+    productos = relationship(
+        "CatalogoMaestroProducto", back_populates="catalogo", cascade="all, delete-orphan"
+    )
+
+
+class CatalogoMaestroSucursal(Base):
+    __tablename__ = "catalogos_maestros_sucursales"
+
+    catalogo_id = Column(String, ForeignKey("catalogos_maestros.id"), primary_key=True)
+    sucursal_id = Column(String, ForeignKey("sucursales.id"), primary_key=True)
+
+    catalogo = relationship("CatalogoMaestro", back_populates="sucursales_comparten")
+    sucursal = relationship("Sucursal", viewonly=True)
+
+
+class CatalogoMaestroProducto(Base):
+    __tablename__ = "catalogos_maestros_productos"
+
+    catalogo_id = Column(String, ForeignKey("catalogos_maestros.id"), primary_key=True)
+    nombre_maestro = Column(String, primary_key=True)
+    alias_local = Column(String, primary_key=True)
+
+    catalogo = relationship("CatalogoMaestro", back_populates="productos")
 
 class UsuarioSucursal(Base):
     __tablename__ = "usuario_sucursales"

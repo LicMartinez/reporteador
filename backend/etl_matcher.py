@@ -2,25 +2,41 @@ import collections
 import csv
 import io
 from rapidfuzz import process, fuzz
+from typing import Optional
+
 from . import models
 
-# SIMULACIÓN BASE DE DATOS DE PRODUCTOS DE TODAS LAS SUCURSALES (En la base de datos extraeríamos desde Venta.detalles)
 class ETLMatcher:
-    def __init__(self, db_session):
+    def __init__(
+        self,
+        db_session,
+        catalogo_maestro_id: Optional[str] = None,
+        sucursal_ids: Optional[list[str]] = None,
+        umbral: int = 85,
+    ):
         self.db = db_session
-        # Tarea 4.2 Mapa Manual (Reglas explícitas de Administrador antes del Fuzz)
-        self.manual_map = {
-            "BURGER SNG": "Hamburguesa Sencilla",
-            "BURG SENCILLA": "Hamburguesa Sencilla",
-            "HAMBURGUESA  SENC": "Hamburguesa Sencilla",
-            "COCA COLA REG": "Refresco Cola 355ml",
-            "COCA. 355": "Refresco Cola 355ml",
-            ">PI FRUTOS ROJOS": "Pastel Individual (Varios)"
-        }
+        self.catalogo_maestro_id = catalogo_maestro_id
+        self.sucursal_ids = sucursal_ids
+        self.umbral = umbral
+
+        # Reglas del catálogo maestro: alias_local -> nombre_maestro
+        self.alias_to_maestro: dict[str, str] = {}
+        self.alias_list: list[str] = []
+        if catalogo_maestro_id:
+            rules = (
+                self.db.query(models.CatalogoMaestroProducto)
+                .filter(models.CatalogoMaestroProducto.catalogo_id == catalogo_maestro_id)
+                .all()
+            )
+            self.alias_list = [r.alias_local for r in rules]
+            self.alias_to_maestro = {r.alias_local: r.nombre_maestro for r in rules}
 
     def fetch_all_products(self):
-        """Tarea 4.3: Extraer productos directamente de los JSON de detalles de Ventas"""
-        ventas = self.db.query(models.Venta).all()
+        """Extrae productos desde `Venta.detalles` (JSON) para mapearlos a nombres maestros."""
+        query = self.db.query(models.Venta)
+        if self.sucursal_ids:
+            query = query.filter(models.Venta.sucursal_id.in_(self.sucursal_ids))
+        ventas = query.all()
         productos = []
         for v in ventas:
             for item in getattr(v, "detalles", []):
@@ -38,34 +54,36 @@ class ETLMatcher:
         return productos
 
     def group_and_match(self, umbral=85):
-        """Tarea 4.1: Sistema de emparejamiento string usando agrupaciones por rapidfuzz"""
+        """Mapea descripciones locales a nombres maestros usando el catálogo (alias + fuzzy)."""
+        umbral = umbral or self.umbral
         raw_products = self.fetch_all_products()
-        master_catalog = collections.defaultdict(lambda: {
-            "nombres_locales": set(), 
-            "cantidad_total": 0, 
-            "ingresos_totales": 0.0,
-            "sucursales_venta": set()
-        })
-        
-        nombres_unicos_descubiertos = list(set([p["descripcion"] for p in raw_products]))
-        
+        master_catalog = collections.defaultdict(
+            lambda: {
+                "nombres_locales": set(),
+                "cantidad_total": 0,
+                "ingresos_totales": 0.0,
+                "sucursales_venta": set(),
+            }
+        )
+
         for p in raw_products:
-            desc = p["descripcion"]
-            # 1. Chequeo de Mapa Manual (Tarea 4.2 Prioridad 1)
-            nombre_maestro = self.manual_map.get(desc)
-            
-            # 2. IA / Distancia de Levenshtein (RapidFuzz Tarea 4.1)
+            desc_norm = str(p["descripcion"]).upper().strip()
+
+            nombre_maestro = None
+            if self.alias_to_maestro and desc_norm in self.alias_to_maestro:
+                # Coincidencia exacta por alias (prioridad 1)
+                nombre_maestro = self.alias_to_maestro[desc_norm]
+
+            if not nombre_maestro and self.alias_list:
+                # Coincidencia fuzzy contra alias del catálogo
+                match = process.extractOne(desc_norm, self.alias_list, scorer=fuzz.token_sort_ratio)
+                if match and match[1] >= umbral:
+                    best_alias = match[0]
+                    nombre_maestro = self.alias_to_maestro.get(best_alias)
+
             if not nombre_maestro:
-                # Buscar en las llaves del master dict que ya hemos insertado en vivo
-                llaves_maestras = list(master_catalog.keys())
-                if llaves_maestras:
-                    match = process.extractOne(desc, llaves_maestras, scorer=fuzz.token_sort_ratio)
-                    if match and match[1] >= umbral:
-                        nombre_maestro = match[0] # Agrupar al máster parecido
-                    else:
-                        nombre_maestro = desc # Es un producto nuevo/distinto
-                else:
-                    nombre_maestro = desc
+                # Fallback si no hay reglas: usa la descripción local como “maestro”
+                nombre_maestro = p["descripcion"]
                     
             # Acumulador Inteligente Consolidador
             node = master_catalog[nombre_maestro]

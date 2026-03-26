@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   AreaChart,
   Area,
@@ -20,7 +21,7 @@ import {
   Users,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { fetchResumen, fetchSucursalesFilter, type Resumen } from '../api/client';
+import { changePassword, exportTop10Csv, fetchResumen, fetchSucursalesFilter, type Resumen } from '../api/client';
 import { format, subDays } from 'date-fns';
 
 function todayISO() {
@@ -77,12 +78,19 @@ const CardStats = ({
 
 export default function Dashboard() {
   const { user, logout } = useAuth();
+  const navigate = useNavigate();
   const [range, setRange] = useState<'hoy' | 'semana'>('hoy');
   const [sucursalId, setSucursalId] = useState<string>('');
   const [sucursales, setSucursales] = useState<{ id: string; nombre: string }[]>([]);
   const [data, setData] = useState<Resumen | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+
+  // Password modal
+  const [pwOpen, setPwOpen] = useState(false);
+  const [pwOld, setPwOld] = useState('');
+  const [pwNew, setPwNew] = useState('');
+  const [pwErr, setPwErr] = useState<string | null>(null);
 
   const { fechaDesde, fechaHasta } = useMemo(() => {
     const hoy = todayISO();
@@ -140,6 +148,51 @@ export default function Dashboard() {
             <LayoutDashboard className="w-5 h-5" />
             Resumen
           </span>
+          {user?.portal_admin && (
+            <button
+              type="button"
+              onClick={() => navigate('/swiss-admin')}
+              className="flex items-center gap-3 px-4 py-3 bg-white text-slate-700 hover:bg-slate-50 rounded-xl font-semibold text-left border border-slate-200"
+            >
+              <Users className="w-5 h-5" />
+              Swiss Admin
+            </button>
+          )}
+
+          <button
+            type="button"
+            onClick={async () => {
+              try {
+                const blob = await exportTop10Csv();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'top10_platillos_consolidado.csv';
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                URL.revokeObjectURL(url);
+              } catch {
+                setErr('No se pudo exportar Top 10.');
+              }
+            }}
+            className="flex items-center gap-3 px-4 py-3 bg-white text-slate-700 hover:bg-slate-50 rounded-xl font-semibold text-left border border-slate-200"
+          >
+            <LogOut className="w-5 h-5 rotate-180" />
+            Exportar Top 10
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setPwOpen(true);
+              setPwErr(null);
+            }}
+            className="flex items-center gap-3 px-4 py-3 bg-white text-slate-700 hover:bg-slate-50 rounded-xl font-semibold text-left border border-slate-200"
+          >
+            <CreditCard className="w-5 h-5" />
+            Cambiar contraseña
+          </button>
         </nav>
 
         <button
@@ -151,6 +204,65 @@ export default function Dashboard() {
           Salir
         </button>
       </aside>
+
+      {pwOpen && (
+        <div className="fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-4">
+          <div className="w-full max-w-md bg-white rounded-2xl shadow-xl border border-slate-200 p-6">
+            <h3 className="text-xl font-bold text-slate-800 mb-2">Cambiar contraseña</h3>
+            <p className="text-sm text-slate-500 mb-4">Solo se actualiza tu contraseña en el dashboard.</p>
+
+            {pwErr && <p className="mb-3 text-sm text-red-600">{pwErr}</p>}
+
+            <div className="space-y-3">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Contraseña actual</label>
+                <input
+                  type="password"
+                  value={pwOld}
+                  onChange={(e) => setPwOld(e.target.value)}
+                  className="w-full rounded-xl border border-slate-200 px-4 py-2.5 text-slate-900 outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Nueva contraseña</label>
+                <input
+                  type="password"
+                  value={pwNew}
+                  onChange={(e) => setPwNew(e.target.value)}
+                  className="w-full rounded-xl border border-slate-200 px-4 py-2.5 text-slate-900 outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+            </div>
+
+            <div className="mt-5 flex gap-3">
+              <button
+                type="button"
+                className="flex-1 py-3 rounded-xl bg-slate-100 text-slate-800 font-semibold hover:bg-slate-200"
+                onClick={() => setPwOpen(false)}
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                className="flex-1 py-3 rounded-xl bg-blue-600 text-white font-semibold hover:bg-blue-700"
+                onClick={async () => {
+                  setPwErr(null);
+                  try {
+                    await changePassword(pwOld, pwNew);
+                    setPwOpen(false);
+                    setPwOld('');
+                    setPwNew('');
+                  } catch {
+                    setPwErr('No se pudo cambiar la contraseña (verifica la actual).');
+                  }
+                }}
+              >
+                Guardar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <main className="flex-1 p-8 md:p-12 overflow-y-auto">
         <header className="flex flex-col md:flex-row justify-between items-start md:items-center mb-10 gap-4">
