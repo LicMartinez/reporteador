@@ -46,14 +46,20 @@ def main():
     email = (os.environ.get("SEED_ADMIN_EMAIL") or "admin@restbar.local").strip().lower()
     password = os.environ.get("SEED_ADMIN_PASSWORD") or "CambiarPassword123!"
     nombre = os.environ.get("SEED_ADMIN_NAME") or "Administrador"
+    sync_password = os.environ.get("SEED_SUCURSAL_PASSWORD") or "TestSync123!"
 
     Base.metadata.create_all(bind=engine)
     _ensure_sqlite_usuario_is_admin()
     db = SessionLocal()
     try:
         for nom in PILOTO:
-            if not db.query(models.Sucursal).filter(models.Sucursal.nombre == nom).first():
-                db.add(models.Sucursal(nombre=nom))
+            suc = db.query(models.Sucursal).filter(models.Sucursal.nombre == nom).first()
+            if not suc:
+                suc = models.Sucursal(nombre=nom)
+                db.add(suc)
+            # Si el agent requiere credenciales por sucursal, guardamos el hash aquí.
+            if sync_password:
+                suc.sync_password_hash = hash_password(sync_password)
         db.commit()
 
         existing = db.query(models.Usuario).filter(models.Usuario.email == email).first()
