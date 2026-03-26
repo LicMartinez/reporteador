@@ -615,7 +615,7 @@ export default function SwissAdminPortal() {
         {tab === 'catalogos' && (
           <div>
             <h2 className="text-3xl font-bold text-slate-800 tracking-tight mb-2">Catálogos maestros</h2>
-            <p className="text-slate-500 mb-6">Alias locales -> nombre maestro para fuzzy matching.</p>
+            <p className="text-slate-500 mb-6">Alias locales → nombre maestro para fuzzy matching.</p>
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
               <section className="card-premium p-6">
