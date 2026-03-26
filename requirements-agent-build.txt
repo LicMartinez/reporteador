@@ -1,0 +1,3 @@
+# Solo en la máquina donde compilas el .exe
+-r requirements.txt
+pyinstaller==6.3.0

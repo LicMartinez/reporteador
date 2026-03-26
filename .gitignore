@@ -1,0 +1,27 @@
+venv/
+__pycache__/
+*.py[cod]
+.env
+.env.local
+*.db
+restbar_local.db
+sync_checkpoint.json
+agent_output_test.json
+agent_sync_error.log
+dist/
+build/
+*.spec.bak
+frontend/dist/
+frontend/node_modules/
+.DS_Store
+
+# Cursor: no subir MCP con tokens (usa mcp.json.example como plantilla)
+.cursor/mcp.json
+
+# Artefactos locales / pruebas (no necesarios en CI ni Render)
+dbf_test_output.txt
+dbf_test_output_utf8.txt
+dbf_test_report.txt
+docx_content.txt
+estructura_restbar.json
+*.docx
