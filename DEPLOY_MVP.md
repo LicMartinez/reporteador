@@ -156,6 +156,14 @@ Herramientas de desarrollo; **no** las cuentes como plataforma del MVP frente a 
 
 ---
 
+## Render: error `AssertionError` con SQLAlchemy al arrancar (Python 3.14)
+
+Los servicios nuevos en Render usan por defecto **Python 3.14**. **SQLAlchemy 2.0.29** (y versiones cercanas) pueden fallar al importar con un `AssertionError` en `TypingOnly`.
+
+Este repo fija **Python 3.12** con el archivo **`.python-version`** en la raíz (Render lo respeta si no defines `PYTHON_VERSION` en el panel, o usa `PYTHON_VERSION=3.12.8` como en `render.yaml`). Tras hacer `git push`, vuelve a desplegar.
+
+---
+
 ## Seguridad
 
 No subas `.env`, tokens `sbp_...`, `JWT_SECRET` ni `SYNC_API_KEY` al repositorio. Usa variables de entorno en el host del backend y en Vercel.
