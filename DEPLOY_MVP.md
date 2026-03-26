@@ -95,7 +95,9 @@ En Vercel → Add New Project → importa el **mismo** repositorio; **Root Direc
 Proyecto **restbar-reporteador-mvp** · ref `rnxzksljzqjwxzjaaqay` · migración `initial_restbar_schema`.
 
 - SQL versionado: `supabase/migrations/20260325233443_initial_restbar_schema.sql`
-- **Connection string:** [Project → Settings → Database](https://supabase.com/dashboard/project/rnxzksljzqjwxzjaaqay/settings/database) (pooler recomendado para servidor).
+- **Connection string:** [Project → Settings → Database](https://supabase.com/dashboard/project/rnxzksljzqjwxzjaaqay/settings/database).
+
+**Importante en Render (y otros hosts sin IPv6 estable):** no uses la URI **directa** `db.<ref>.supabase.co` en el puerto **5432** si ves `Network is unreachable` hacia una dirección IPv6. En el mismo panel de Supabase elige **Connection pooling** → modo **Session** o **Transaction**, host del tipo `*.pooler.supabase.com`, puerto **6543**, y copia la cadena que te da (el usuario en Session suele ser `postgres.<project_ref>`). Pégala en Render como `DATABASE_URL` con el prefijo del driver que ya usas, p. ej. `postgresql+psycopg2://...`. El código en `backend/database.py` fuerza `sslmode=require` también para hosts `pooler.supabase.com`.
 
 ---
 
@@ -153,6 +155,16 @@ Herramientas de desarrollo; **no** las cuentes como plataforma del MVP frente a 
 
 - `POST /auth/login` · `GET /auth/me` · `GET /dashboard/resumen?...`  
 - `POST /sync/upload/{SUCURSAL}` + `X-API-Key` si configuraste `SYNC_API_KEY`
+
+---
+
+## Render ↔ Supabase: `OperationalError` / “Network is unreachable”
+
+El aviso de SQLAlchemy [error e3q8](https://docs.sqlalchemy.org/en/20/errors.html#error-e3q8) agrupa **cualquier** fallo del driver al conectar; el mensaje real suele venir de **psycopg2**. Si en el traceback aparece `db.*.supabase.co` y una ruta **IPv6** seguida de `Network is unreachable`, el problema no es el ORM sino la **red hasta ese host/puerto**.
+
+1. Sustituye `DATABASE_URL` en Render por la URI del **pooler** (puerto **6543**), no la conexión directa al puerto 5432.
+2. Vuelve a desplegar el servicio tras guardar la variable.
+3. Si aún falla, revisa en Supabase que la contraseña y el usuario de la cadena del pooler coincidan con el modo elegido (Session vs Transaction).
 
 ---
 
