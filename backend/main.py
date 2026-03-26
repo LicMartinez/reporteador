@@ -7,6 +7,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
+import logging
+
 from .database import Base, engine, get_db
 from . import models
 from .etl_matcher import ETLMatcher
@@ -14,12 +16,22 @@ from .auth_core import create_access_token, verify_password
 from . import schemas
 from .deps import get_current_user, verify_sync_api_key
 
-Base.metadata.create_all(bind=engine)
+logger = logging.getLogger(__name__)
 
 _origins = os.environ.get("ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")
 ALLOWED_ORIGINS = [o.strip() for o in _origins.split(",") if o.strip()]
 
 app = FastAPI(title="RestBar Dashboard API - Core MultiTenant", version="1.3")
+
+
+@app.on_event("startup")
+def _on_startup():
+    """Crea tablas si no existen. No mata el proceso si la DB tarda en responder."""
+    try:
+        Base.metadata.create_all(bind=engine)
+        logger.info("create_all OK — tablas verificadas")
+    except Exception as exc:
+        logger.error("create_all falló (se reintentará en la primera petición): %s", exc)
 
 app.add_middleware(
     CORSMiddleware,
