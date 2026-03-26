@@ -52,11 +52,18 @@ Render despliega desde **Git** (GitHub, GitLab o Bitbucket). El flujo habitual e
 
 ### B) Subir este proyecto desde tu PC (PowerShell)
 
-En la carpeta del proyecto (ya con `git init` y primer commit si lo generamos en el repo):
+El repositorio local ya tiene **`git init`**, rama **`main`** y un **commit inicial**. Antes del primer `push`, pon tu identidad de autor (solo en este repo o con `--global`):
 
 ```powershell
 cd c:\desarrollo\reporteador
-git branch -M main
+git config user.name "Tu Nombre"
+git config user.email "tu-correo@ejemplo.com"
+git commit --amend --reset-author --no-edit
+```
+
+Luego enlaza GitHub y sube:
+
+```powershell
 git remote add origin https://github.com/TU_USUARIO/TU_REPO.git
 git push -u origin main
 ```
