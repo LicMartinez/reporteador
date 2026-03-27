@@ -1,4 +1,5 @@
-# Maquina donde compilas los .exe (PyInstaller + opcional Pillow para .ico)
--r requirements.txt
-pyinstaller==6.3.0
+﻿# Maquina donde compilas los .exe (PyInstaller + opcional Pillow para .ico).
+# Incluye httpx/dbfread (agente); no arrastra psycopg2 ni el resto del backend.
+-r requirements-agent-runtime.txt
+pyinstaller>=6.3.0
 pillow>=10.0.0

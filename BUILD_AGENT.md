@@ -16,9 +16,10 @@ Desde la **raíz del repo** `reporteador`:
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\activate
-pip install -r requirements.txt
 pip install -r requirements-agent-build.txt
 ```
+
+`requirements-agent-build.txt` ya incluye `httpx`, `dbfread` y PyInstaller; evita instalar todo `requirements.txt` (útil si `psycopg2-binary` u otras dependencias del backend fallan en tu versión de Python). Para desarrollar el API en la misma máquina, instala aparte `requirements.txt`.
 
 ## 2. Icono para PyInstaller e Inno
 
@@ -61,6 +62,8 @@ pyinstaller agent/windows/DashboardSyncSW-config.spec --noconfirm
 
 Salida: `dist/DashboardSyncSW.exe` (consola, bucle de sync) y `dist/DashboardSyncSWConfig.exe` (GUI).
 
+Los `.spec` empaquetan la pila HTTP y tienen **UPX desactivado**, lo que suele reducir falsos positivos de antivirus. Los `.exe` sin firma pueden ser bloqueados: permitir en el dispositivo, reportar falso positivo o firmar con Authenticode.
+
 ## 5. Inno Setup
 
 1. Abrir `agent/windows/DashboardSyncSW.iss` en Inno Setup Compiler.
@@ -73,4 +76,4 @@ Antes de compilar, verifica que existan los dos `.exe` en `dist/` y `agent/windo
 
 Usa [NSSM](https://nssm.cc/) u otra herramienta apuntando a `DashboardSyncSW.exe` en la carpeta de instalación. La cuenta del servicio debe poder **leer** la carpeta DBC del POS. El intervalo del bucle está en `sync_config.json` (`loop_seconds`).
 
-Consulta también [docs/AGENTE_WINDOWS.md](docs/AGENTE_WINDOWS.md).
+Consulta también [docs/AGENTE_WINDOWS.md](docs/AGENTE_WINDOWS.md) (incluye un **roadmap** para icono en bandeja del sistema en una versión futura).

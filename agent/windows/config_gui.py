@@ -1,8 +1,11 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """Dashboard Sync SW — ventana de configuracion (Tkinter)."""
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
+import threading
 from pathlib import Path as P
 
 _ROOT = P(__file__).resolve().parents[2]
@@ -13,6 +16,8 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 import httpx
+
+import agent_sync
 
 from agent.windows.sync_config import (
     default_config_dict,
@@ -25,8 +30,8 @@ from agent.windows.sync_config import (
 def main() -> None:
     root = tk.Tk()
     root.title("Dashboard Sync SW — Configuracion")
-    root.geometry("640x520")
-    root.minsize(560, 440)
+    root.geometry("640x560")
+    root.minsize(560, 480)
 
     base = default_config_dict()
     file_data = load_config_file()
@@ -85,6 +90,10 @@ def main() -> None:
     path_lbl.grid(row=row, column=0, columnspan=3, sticky="w", pady=(12, 4))
     row += 1
 
+    prog = ttk.Progressbar(frm, maximum=100.0, mode="determinate")
+    prog.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(0, 6))
+    row += 1
+
     status = ttk.Label(frm, text="", font=("Segoe UI", 9))
     status.grid(row=row, column=0, columnspan=3, sticky="w")
     row += 1
@@ -130,12 +139,136 @@ def main() -> None:
         except Exception as e:
             messagebox.showerror("API", f"No se pudo conectar: {e}")
 
+    _busy = {"v": False}
+
+    def start_worker_detached() -> None:
+        if sys.platform != "win32":
+            return
+        CREATE_NO_WINDOW = 0x08000000
+        DETACHED_PROCESS = 0x00000008
+        flags = CREATE_NO_WINDOW | DETACHED_PROCESS
+        if getattr(sys, "frozen", False):
+            exe_dir = os.path.dirname(sys.executable)
+            worker = os.path.join(exe_dir, "DashboardSyncSW.exe")
+            if not os.path.isfile(worker):
+                return
+            args = [worker]
+            cwd = exe_dir
+        else:
+            worker_py = _ROOT / "agent" / "windows" / "worker_main.py"
+            if not worker_py.is_file():
+                return
+            args = [sys.executable, str(worker_py)]
+            cwd = str(_ROOT)
+        subprocess.Popen(
+            args,
+            cwd=cwd,
+            close_fds=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=flags,
+        )
+
+    def on_exit():
+        if _busy["v"]:
+            messagebox.showinfo(
+                "Dashboard Sync SW",
+                "Espere a que termine la carga antes de cerrar la ventana.",
+            )
+            return
+        try:
+            save_config_file(collect())
+        except OSError:
+            pass
+        start_worker_detached()
+        root.destroy()
+
+
+    def set_busy(busy: bool):
+        _busy["v"] = busy
+        st = tk.DISABLED if busy else tk.NORMAL
+        for w in action_widgets:
+            w.config(state=st)
+
+    def on_progress(msg: str, pct: float) -> None:
+        def upd():
+            status.config(text=msg)
+            prog.config(value=float(pct))
+
+        root.after(0, upd)
+
+    def on_run():
+        if _busy["v"]:
+            return
+        data = collect()
+        if not (data.get("dbc_dir") or "").strip():
+            messagebox.showwarning("Carga", "Indica la carpeta DBC.")
+            return
+        if not (data.get("sucursal_nombre") or "").strip():
+            messagebox.showwarning("Carga", "Indica el nombre de sucursal.")
+            return
+        if not (data.get("sync_api_url") or "").strip():
+            messagebox.showwarning("Carga", "Indica la URL del API.")
+            return
+        try:
+            save_config_file(data)
+        except OSError as e:
+            messagebox.showerror("Carga", f"No se pudo guardar la configuracion: {e}")
+            return
+
+        set_busy(True)
+        prog.config(value=0)
+        status.config(text="Iniciando carga…")
+
+        def work():
+            try:
+                agent_sync._setup_logging()
+                result = agent_sync.run_sync_from_gui(on_progress)
+            except Exception as e:
+                result = {
+                    "success": False,
+                    "tickets": 0,
+                    "nuevas": 0,
+                    "errores": 0,
+                    "error": str(e),
+                }
+
+            def done():
+                set_busy(False)
+                if not result.get("success"):
+                    messagebox.showerror("Carga", result.get("error") or "Error desconocido.")
+
+            root.after(0, done)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    hint = ttk.Label(
+        frm,
+        text="El agente corre en segundo plano sin ventana (Administrador de tareas). "
+        "Se inicia al abrir esta ventana y al pulsar Salir. Intervalo bucle > 0 para repeticion continua.",
+        font=("Segoe UI", 8),
+        foreground="#555",
+        wraplength=600,
+        justify="left",
+    )
+    hint.grid(row=row, column=0, columnspan=3, sticky="w", pady=(8, 0))
+    row += 1
+
     bf = ttk.Frame(frm)
     bf.grid(row=row, column=0, columnspan=3, pady=(16, 0))
-    ttk.Button(bf, text="Guardar", command=on_save).pack(side=tk.LEFT, padx=(0, 8))
-    ttk.Button(bf, text="Probar API", command=on_test).pack(side=tk.LEFT, padx=(0, 8))
-    ttk.Button(bf, text="Salir", command=root.destroy).pack(side=tk.LEFT)
+    btn_save = ttk.Button(bf, text="Guardar", command=on_save)
+    btn_save.pack(side=tk.LEFT, padx=(0, 8))
+    btn_test = ttk.Button(bf, text="Probar API", command=on_test)
+    btn_test.pack(side=tk.LEFT, padx=(0, 8))
+    btn_run = ttk.Button(bf, text="Ejecutar carga", command=on_run)
+    btn_run.pack(side=tk.LEFT, padx=(0, 8))
+    btn_exit = ttk.Button(bf, text="Salir", command=on_exit)
+    btn_exit.pack(side=tk.LEFT)
+    action_widgets = (btn_save, btn_test, btn_run, btn_exit)
 
+    start_worker_detached()
+    root.protocol("WM_DELETE_WINDOW", on_exit)
     root.mainloop()
 
 

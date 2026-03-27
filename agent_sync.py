@@ -4,7 +4,7 @@ import time
 import datetime
 import logging
 import sys
-from typing import Any, List
+from typing import Any, Callable, List
 
 import httpx
 from dbfread import DBF
@@ -33,9 +33,10 @@ def _setup_logging() -> None:
     fh = logging.FileHandler(log_path, encoding="utf-8")
     fh.setFormatter(fmt)
     root.addHandler(fh)
-    sh = logging.StreamHandler()
-    sh.setFormatter(fmt)
-    root.addHandler(sh)
+    if not getattr(sys, "frozen", False):
+        sh = logging.StreamHandler()
+        sh.setFormatter(fmt)
+        root.addHandler(sh)
     _logger_configured = True
 
 
@@ -173,7 +174,11 @@ def process_historical(dbc_dir: str, tarjetas_map: dict, last_orden: str) -> Lis
     return processed_sales
 
 
-def upload_historial(rows: List[dict], settings: dict) -> dict:
+def upload_historial(
+    rows: List[dict],
+    settings: dict,
+    on_chunk: Callable[[int, int], None] | None = None,
+) -> dict:
     sync_api_url = settings["sync_api_url"].rstrip("/")
     sucursal = settings["sucursal_nombre"].strip()
     pwd = settings.get("sucursal_password") or ""
@@ -189,18 +194,21 @@ def upload_historial(rows: List[dict], settings: dict) -> dict:
 
     total_new = 0
     errores = 0
+    n_chunks = max(1, (len(rows) + batch_size - 1) // batch_size) if rows else 1
     with httpx.Client(timeout=120.0) as client:
-        for i in range(0, len(rows), batch_size):
+        for chunk_num, i in enumerate(range(0, len(rows), batch_size), start=1):
             chunk = rows[i : i + batch_size]
             resp = client.post(url, json={"historial": chunk}, headers=headers)
             resp.raise_for_status()
             body = resp.json()
             total_new += int(body.get("nuevas_ventas_historial_insertadas", 0))
             errores += int(body.get("logs_huerfanos", 0))
+            if on_chunk:
+                on_chunk(chunk_num, n_chunks)
     return {"nuevas": total_new, "errores": errores}
 
 
-def run_once() -> None:
+def _execute_single_sync(progress: Callable[[str, float], None] | None = None) -> dict:
     s = reload_settings()
     dbc = s.get("dbc_dir", r"C:\RestBar\DBC")
     ck = s.get("checkpoint_path") or ""
@@ -211,17 +219,47 @@ def run_once() -> None:
     if not s.get("sucursal_password"):
         logging.warning("sucursal_password vacio. La subida a /sync/upload fallara.")
 
+    if progress:
+        progress("Leyendo archivos DBC…", 5.0)
+
     last = load_checkpoint(ck)
     tarjetas_map = get_tarjetas_map(dbc)
+    if progress:
+        progress("Procesando ventas pendientes…", 18.0)
     historical_sales = process_historical(dbc, tarjetas_map, last)
 
     if not historical_sales:
         logging.info("Sin ventas nuevas respecto al checkpoint (o sin datos).")
-        return
+        if progress:
+            progress("Sin ventas nuevas (checkpoint al día, sin DBF o sin datos).", 100.0)
+        return {
+            "success": True,
+            "tickets": 0,
+            "nuevas": 0,
+            "errores": 0,
+            "error": None,
+        }
 
-    batch = int(s.get("batch_size") or 250)
-    logging.info("Enviando %s tickets nuevos en lotes de %s...", len(historical_sales), batch)
-    summary = upload_historial(historical_sales, s)
+    def on_chunk(cur: int, total: int) -> None:
+        if progress:
+            pct = 25.0 + 70.0 * (cur / max(total, 1))
+            progress(f"Subiendo al servidor: lote {cur} de {total}…", min(pct, 99.0))
+
+    logging.info("Enviando %s tickets nuevos en lotes…", len(historical_sales))
+    try:
+        summary = upload_historial(historical_sales, s, on_chunk=on_chunk)
+    except Exception as e:
+        logging.exception("Fallo en sync: %s", e)
+        if progress:
+            progress(f"Error: {e}", 100.0)
+        return {
+            "success": False,
+            "tickets": len(historical_sales),
+            "nuevas": 0,
+            "errores": 0,
+            "error": str(e),
+        }
+
     max_orden = max(historical_sales, key=lambda x: orden_sort_key(x["orden"]))["orden"]
     save_checkpoint(ck, max_orden)
     logging.info(
@@ -230,6 +268,26 @@ def run_once() -> None:
         summary["errores"],
         max_orden,
     )
+    if progress:
+        progress(
+            f"Completado: {len(historical_sales)} ticket(s); nuevas ~{summary['nuevas']}, huérfanos {summary['errores']}.",
+            100.0,
+        )
+    return {
+        "success": True,
+        "tickets": len(historical_sales),
+        "nuevas": summary["nuevas"],
+        "errores": summary["errores"],
+        "error": None,
+    }
+
+
+def run_once() -> None:
+    _execute_single_sync(None)
+
+
+def run_sync_from_gui(progress: Callable[[str, float], None]) -> dict:
+    return _execute_single_sync(progress)
 
 
 def run_sync_agent() -> None:
