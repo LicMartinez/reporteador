@@ -22,8 +22,8 @@ Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 ArchitecturesInstallIn64BitMode=x64
-UninstallDisplayIcon={app}\app.ico
-SetupIconFile=assets\app.ico
+UninstallDisplayIcon={app}\icono_sincronizador.ico
+SetupIconFile=assets\icono_sincronizador.ico
 VersionInfoVersion={#MyAppVersion}.0
 VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription=Instalador {#MyAppName}
@@ -38,13 +38,13 @@ Name: "desktopicon"; Description: "Crear icono en el escritorio (Configuracion)"
 [Files]
 Source: "..\..\dist\DashboardSyncSW.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\dist\DashboardSyncSWConfig.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "assets\app.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "assets\icono_sincronizador.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{autoprograms}\{#MyAppName}\Configuracion {#MyAppName}"; Filename: "{app}\DashboardSyncSWConfig.exe"; IconFilename: "{app}\app.ico"
-Name: "{autoprograms}\{#MyAppName}\Carpeta datos (config y logs)"; Filename: "{sys}\explorer.exe"; Parameters: """{commonappdata}\DashboardSyncSW"""; IconFilename: "{app}\app.ico"
-Name: "{autoprograms}\{#MyAppName}\Desinstalar {#MyAppName}"; Filename: "{uninstallexe}"; IconFilename: "{app}\app.ico"
-Name: "{userdesktop}\{#MyAppName} Config"; Filename: "{app}\DashboardSyncSWConfig.exe"; IconFilename: "{app}\app.ico"; Tasks: desktopicon
+Name: "{autoprograms}\{#MyAppName}\Configuracion {#MyAppName}"; Filename: "{app}\DashboardSyncSWConfig.exe"; IconFilename: "{app}\icono_sincronizador.ico"
+Name: "{autoprograms}\{#MyAppName}\Carpeta datos (config y logs)"; Filename: "{sys}\explorer.exe"; Parameters: """{commonappdata}\DashboardSyncSW"""; IconFilename: "{app}\icono_sincronizador.ico"
+Name: "{autoprograms}\{#MyAppName}\Desinstalar {#MyAppName}"; Filename: "{uninstallexe}"; IconFilename: "{app}\icono_sincronizador.ico"
+Name: "{userdesktop}\{#MyAppName} Config"; Filename: "{app}\DashboardSyncSWConfig.exe"; IconFilename: "{app}\icono_sincronizador.ico"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\DashboardSyncSWConfig.exe"; Description: "Abrir configuracion al terminar"; Flags: nowait postinstall skipifsilent

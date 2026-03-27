@@ -6,7 +6,10 @@ from pathlib import Path
 block_cipher = None
 SPEC_ROOT = Path(SPECPATH).resolve()
 REPO_ROOT = SPEC_ROOT.parent.parent
-_ICO = REPO_ROOT / "agent" / "windows" / "assets" / "app.ico"
+_ASSETS = REPO_ROOT / "agent" / "windows" / "assets"
+_ICO = _ASSETS / "icono_sincronizador.ico"
+if not _ICO.is_file():
+    _ICO = _ASSETS / "app.ico"
 icon_path = str(_ICO) if _ICO.is_file() else None
 
 a = Analysis(
