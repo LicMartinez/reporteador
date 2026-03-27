@@ -25,3 +25,5 @@ dbf_test_report.txt
 docx_content.txt
 estructura_restbar.json
 *.docx
+
+output_installer/
