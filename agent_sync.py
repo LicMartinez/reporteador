@@ -3,28 +3,46 @@ import json
 import time
 import datetime
 import logging
+import sys
 from typing import Any, List
 
 import httpx
 from dbfread import DBF
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler("agent_sync_error.log", encoding="utf-8"),
-        logging.StreamHandler(),
-    ],
-)
+from agent.windows.sync_config import merged_config
 
-DBC_DIR = os.environ.get("DBC_DIR", r"C:\RestBar\DBC")
-SUCURSAL_NOMBRE = os.environ.get("SUCURSAL_NOMBRE", "SUC_PRUEBA").strip()
-SUCURSAL_PASSWORD = os.environ.get("SUCURSAL_PASSWORD", "").strip()
-SYNC_API_URL = os.environ.get("SYNC_API_URL", "http://127.0.0.1:8000").rstrip("/")
-SYNC_API_KEY = os.environ.get("SYNC_API_KEY", "").strip()
-CHECKPOINT_PATH = os.environ.get("SYNC_CHECKPOINT_PATH", "sync_checkpoint.json")
-BATCH_SIZE = int(os.environ.get("SYNC_BATCH_SIZE", "250"))
-LOOP_SECONDS = int(os.environ.get("SYNC_LOOP_SECONDS", "0"))
+_settings: dict = {}
+_logger_configured = False
+
+
+def _setup_logging() -> None:
+    global _logger_configured
+    if _logger_configured:
+        return
+    cfg = merged_config()
+    data_dir = cfg.get("data_dir", ".")
+    try:
+        os.makedirs(data_dir, exist_ok=True)
+    except OSError:
+        data_dir = "."
+    log_path = os.path.join(data_dir, "agent_sync.log")
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.setLevel(logging.INFO)
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+    fh = logging.FileHandler(log_path, encoding="utf-8")
+    fh.setFormatter(fmt)
+    root.addHandler(fh)
+    sh = logging.StreamHandler()
+    sh.setFormatter(fmt)
+    root.addHandler(sh)
+    _logger_configured = True
+
+
+def reload_settings() -> dict:
+    global _settings
+    _settings = merged_config()
+    return _settings
 
 
 def datetime_convert(v: Any) -> Any:
@@ -41,26 +59,27 @@ def orden_sort_key(o: str) -> int:
         return 0
 
 
-def load_checkpoint() -> str:
-    if not os.path.isfile(CHECKPOINT_PATH):
+def load_checkpoint(path: str) -> str:
+    if not os.path.isfile(path):
         return ""
     try:
-        with open(CHECKPOINT_PATH, encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
         return str(data.get("last_orden", "") or "").strip()
     except (OSError, json.JSONDecodeError):
         return ""
 
 
-def save_checkpoint(last_orden: str) -> None:
-    with open(CHECKPOINT_PATH, "w", encoding="utf-8") as f:
+def save_checkpoint(path: str, last_orden: str) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
         json.dump({"last_orden": last_orden, "updated": datetime.datetime.now().isoformat()}, f, indent=2)
 
 
-def safely_read_dbf(file_name: str, retries: int = 5, delay: int = 5) -> List[dict]:
-    path = os.path.join(DBC_DIR, file_name)
+def safely_read_dbf(dbc_dir: str, file_name: str, retries: int = 5, delay: int = 5) -> List[dict]:
+    path = os.path.join(dbc_dir, file_name)
     if not os.path.exists(path):
-        logging.warning("Archivo %s no encontrado en %s", file_name, DBC_DIR)
+        logging.warning("Archivo %s no encontrado en %s", file_name, dbc_dir)
         return []
 
     for attempt in range(retries):
@@ -82,8 +101,8 @@ def safely_read_dbf(file_name: str, retries: int = 5, delay: int = 5) -> List[di
     return []
 
 
-def get_tarjetas_map() -> dict:
-    tarjetas_records = safely_read_dbf("TARJETAS.DBF")
+def get_tarjetas_map(dbc_dir: str) -> dict:
+    tarjetas_records = safely_read_dbf(dbc_dir, "TARJETAS.DBF")
     tarjeta_map = {}
     for t in tarjetas_records:
         cod = str(t.get("COD_TAR", "")).strip()
@@ -93,9 +112,9 @@ def get_tarjetas_map() -> dict:
     return tarjeta_map
 
 
-def process_historical(tarjetas_map: dict, last_orden: str) -> List[dict]:
-    factura1 = safely_read_dbf("FACTURA1.DBF")
-    factura2 = safely_read_dbf("FACTURA2.DBF")
+def process_historical(dbc_dir: str, tarjetas_map: dict, last_orden: str) -> List[dict]:
+    factura1 = safely_read_dbf(dbc_dir, "FACTURA1.DBF")
+    factura2 = safely_read_dbf(dbc_dir, "FACTURA2.DBF")
 
     details_map: dict[str, List[dict]] = {}
     for f2item in factura2:
@@ -112,7 +131,7 @@ def process_historical(tarjetas_map: dict, last_orden: str) -> List[dict]:
     for f1item in factura1:
         orden = str(f1item.get("ORDEN", "")).strip()
         if not orden:
-            logging.warning("FACTURA1 sin ORDEN — se omite (backend registraría huérfano).")
+            logging.warning("FACTURA1 sin ORDEN — se omite (backend registraria huerfano).")
             continue
         if last_key >= 0 and orden_sort_key(orden) <= last_key:
             continue
@@ -154,19 +173,25 @@ def process_historical(tarjetas_map: dict, last_orden: str) -> List[dict]:
     return processed_sales
 
 
-def upload_historial(rows: List[dict]) -> dict:
-    url = f"{SYNC_API_URL}/sync/upload/{SUCURSAL_NOMBRE}"
+def upload_historial(rows: List[dict], settings: dict) -> dict:
+    sync_api_url = settings["sync_api_url"].rstrip("/")
+    sucursal = settings["sucursal_nombre"].strip()
+    pwd = settings.get("sucursal_password") or ""
+    api_key = settings.get("sync_api_key") or ""
+    batch_size = int(settings.get("batch_size") or 250)
+
+    url = f"{sync_api_url}/sync/upload/{sucursal}"
     headers = {"Content-Type": "application/json"}
-    if SYNC_API_KEY:
-        headers["X-API-Key"] = SYNC_API_KEY
-    if SUCURSAL_PASSWORD:
-        headers["X-Sucursal-Password"] = SUCURSAL_PASSWORD
+    if api_key:
+        headers["X-API-Key"] = api_key
+    if pwd:
+        headers["X-Sucursal-Password"] = pwd
 
     total_new = 0
     errores = 0
     with httpx.Client(timeout=120.0) as client:
-        for i in range(0, len(rows), BATCH_SIZE):
-            chunk = rows[i : i + BATCH_SIZE]
+        for i in range(0, len(rows), batch_size):
+            chunk = rows[i : i + batch_size]
             resp = client.post(url, json={"historial": chunk}, headers=headers)
             resp.raise_for_status()
             body = resp.json()
@@ -176,23 +201,31 @@ def upload_historial(rows: List[dict]) -> dict:
 
 
 def run_once() -> None:
-    logging.info("Agente sync — sucursal=%s API=%s", SUCURSAL_NOMBRE, SYNC_API_URL)
-    if not SUCURSAL_PASSWORD:
-        logging.warning("SUCURSAL_PASSWORD no está configurado. La subida a /sync/upload fallará.")
-    last = load_checkpoint()
-    tarjetas_map = get_tarjetas_map()
-    historical_sales = process_historical(tarjetas_map, last)
+    s = reload_settings()
+    dbc = s.get("dbc_dir", r"C:\RestBar\DBC")
+    ck = s.get("checkpoint_path") or ""
+    suc = s.get("sucursal_nombre", "")
+    api = s.get("sync_api_url", "")
+
+    logging.info("Agente sync — sucursal=%s API=%s DBC=%s", suc, api, dbc)
+    if not s.get("sucursal_password"):
+        logging.warning("sucursal_password vacio. La subida a /sync/upload fallara.")
+
+    last = load_checkpoint(ck)
+    tarjetas_map = get_tarjetas_map(dbc)
+    historical_sales = process_historical(dbc, tarjetas_map, last)
 
     if not historical_sales:
         logging.info("Sin ventas nuevas respecto al checkpoint (o sin datos).")
         return
 
-    logging.info("Enviando %s tickets nuevos en lotes de %s...", len(historical_sales), BATCH_SIZE)
-    summary = upload_historial(historical_sales)
+    batch = int(s.get("batch_size") or 250)
+    logging.info("Enviando %s tickets nuevos en lotes de %s...", len(historical_sales), batch)
+    summary = upload_historial(historical_sales, s)
     max_orden = max(historical_sales, key=lambda x: orden_sort_key(x["orden"]))["orden"]
-    save_checkpoint(max_orden)
+    save_checkpoint(ck, max_orden)
     logging.info(
-        "Sync OK — insertadas ~%s, logs huérfanos=%s, checkpoint ORDEN=%s",
+        "Sync OK — insertadas ~%s, logs huerfanos=%s, checkpoint ORDEN=%s",
         summary["nuevas"],
         summary["errores"],
         max_orden,
@@ -200,16 +233,32 @@ def run_once() -> None:
 
 
 def run_sync_agent() -> None:
-    if LOOP_SECONDS > 0:
+    s = reload_settings()
+    loop = int(s.get("loop_seconds") or 0)
+    if loop > 0:
         while True:
             try:
                 run_once()
             except Exception as e:
                 logging.exception("Error en ciclo de sync: %s", e)
-            time.sleep(LOOP_SECONDS)
+            time.sleep(loop)
     else:
         run_once()
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Arranque: logging, bucle o corrida unica."""
+    if getattr(sys, "frozen", False):
+        exe_dir = os.path.dirname(sys.executable)
+        if exe_dir and exe_dir not in sys.path:
+            sys.path.insert(0, exe_dir)
+        root_guess = os.path.dirname(exe_dir)
+        if root_guess and root_guess not in sys.path:
+            sys.path.insert(0, root_guess)
+    _setup_logging()
+    reload_settings()
     run_sync_agent()
+
+
+if __name__ == "__main__":
+    main()
