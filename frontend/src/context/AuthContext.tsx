@@ -1,6 +1,13 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import type { UserMe } from '../api/client';
 import { fetchMe, login as apiLogin } from '../api/client';
+import {
+  clearStoredAuth,
+  getStoredToken,
+  getStoredUserJson,
+  migrateLegacyAuthStorage,
+  setStoredAuth,
+} from '../lib/authStorage';
 
 type AuthState = {
   user: UserMe | null;
@@ -16,14 +23,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   const logout = useCallback(() => {
-    localStorage.removeItem('restbar_token');
-    localStorage.removeItem('restbar_user');
+    clearStoredAuth();
     setUser(null);
   }, []);
 
   useEffect(() => {
-    const token = localStorage.getItem('restbar_token');
-    const cached = localStorage.getItem('restbar_user');
+    migrateLegacyAuthStorage();
+    const token = getStoredToken();
+    const cached = getStoredUserJson();
     if (cached) {
       try {
         setUser(JSON.parse(cached));
@@ -38,7 +45,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     fetchMe()
       .then((me) => {
         setUser(me);
-        localStorage.setItem('restbar_user', JSON.stringify(me));
+        const t = getStoredToken();
+        if (t) setStoredAuth(t, JSON.stringify(me));
       })
       .catch(() => logout())
       .finally(() => setLoading(false));
@@ -46,8 +54,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const login = useCallback(async (email: string, password: string) => {
     const data = await apiLogin(email, password);
-    localStorage.setItem('restbar_token', data.access_token);
-    localStorage.setItem('restbar_user', JSON.stringify(data.user));
+    setStoredAuth(data.access_token, JSON.stringify(data.user));
     setUser(data.user);
   }, []);
 

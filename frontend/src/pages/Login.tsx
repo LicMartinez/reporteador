@@ -42,8 +42,8 @@ export default function Login() {
             <Activity className="w-7 h-7 text-white" />
           </div>
           <div>
-            <h1 className="text-xl font-bold text-slate-800">RestBar Hub</h1>
-            <p className="text-xs text-slate-500 uppercase tracking-wide">Acceso socios</p>
+            <h1 className="text-xl font-bold text-slate-800">SwissTools Pos</h1>
+            <p className="text-xs text-slate-500 uppercase tracking-wide">Portal dashboard</p>
           </div>
         </div>
 

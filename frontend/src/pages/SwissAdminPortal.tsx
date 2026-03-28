@@ -303,7 +303,7 @@ export default function SwissAdminPortal() {
           </div>
           <div>
             <h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-slate-800 to-slate-600">
-              RestBar Hub
+              SwissTools Pos
             </h1>
             <p className="text-xs text-slate-500 font-medium uppercase tracking-wider">Swiss Tools Admon</p>
           </div>

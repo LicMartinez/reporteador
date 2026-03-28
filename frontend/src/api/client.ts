@@ -1,6 +1,9 @@
 import axios from 'axios';
+import { clearStoredAuth, getStoredToken, migrateLegacyAuthStorage } from '../lib/authStorage';
 
 const base = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
+
+migrateLegacyAuthStorage();
 
 export const api = axios.create({
   baseURL: base.replace(/\/$/, ''),
@@ -8,7 +11,7 @@ export const api = axios.create({
 });
 
 api.interceptors.request.use((config) => {
-  const t = localStorage.getItem('restbar_token');
+  const t = getStoredToken();
   if (t) {
     config.headers.Authorization = `Bearer ${t}`;
   }
@@ -19,8 +22,7 @@ api.interceptors.response.use(
   (r) => r,
   (err) => {
     if (err.response?.status === 401) {
-      localStorage.removeItem('restbar_token');
-      localStorage.removeItem('restbar_user');
+      clearStoredAuth();
       if (!window.location.pathname.includes('/login')) {
         window.location.href = '/login';
       }
@@ -38,6 +40,27 @@ export type UserMe = {
   sucursales: { id: string; nombre: string; rol: string | null }[];
 };
 
+export type ResumenPorDia = {
+  fecha: string;
+  total_pagado: number;
+  num_tickets: number;
+  total_efectivo: number;
+  total_tarjeta: number;
+};
+
+export type ResumenTopProducto = {
+  nombre: string;
+  codigo: string | null;
+  total_renglon: number;
+  cantidad: number;
+};
+
+export type ResumenDeltas = {
+  total_ingresos_pct: number | null;
+  num_tickets_pct: number | null;
+  ticket_promedio_pct: number | null;
+};
+
 export type Resumen = {
   total_ingresos: number;
   num_tickets: number;
@@ -46,6 +69,9 @@ export type Resumen = {
   total_tarjeta: number;
   por_hora: { name: string; ventas: number }[];
   por_metodo: { name: string; amount: number }[];
+  por_dia: ResumenPorDia[];
+  top_productos: ResumenTopProducto[];
+  deltas?: ResumenDeltas | null;
 };
 
 export type AdminUserBrief = {
@@ -201,9 +227,19 @@ export async function fetchMe() {
   return data;
 }
 
-export async function fetchResumen(fechaDesde: string, fechaHasta: string, sucursalId?: string) {
+export async function fetchResumen(
+  fechaDesde: string,
+  fechaHasta: string,
+  sucursalId?: string,
+  opts?: { includePrevious?: boolean }
+) {
   const { data } = await api.get<Resumen>('/dashboard/resumen', {
-    params: { fecha_desde: fechaDesde, fecha_hasta: fechaHasta, sucursal_id: sucursalId || undefined },
+    params: {
+      fecha_desde: fechaDesde,
+      fecha_hasta: fechaHasta,
+      sucursal_id: sucursalId || undefined,
+      include_previous: opts?.includePrevious ? true : undefined,
+    },
   });
   return data;
 }

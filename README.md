@@ -1,6 +1,6 @@
-# RestBar — Dashboard multi-sucursal (MVP)
+# SwissTools Pos — Portal dashboard multi-sucursal (MVP)
 
-Backend **FastAPI** + frontend **React (Vite)** + base **PostgreSQL en Supabase**. Ingesta desde puntos de venta RestBar vía agente Python (opcional en fase inicial).
+Backend **FastAPI** + frontend **React (Vite)** + base **PostgreSQL en Supabase**. Ingesta desde puntos de venta vía agente Python de sincronización (opcional en fase inicial).
 
 ## Documentación
 

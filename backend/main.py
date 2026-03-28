@@ -1,7 +1,7 @@
 import os
 from collections import defaultdict
-from datetime import datetime, timezone
-from typing import List, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, List, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 _origins = os.environ.get("ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")
 ALLOWED_ORIGINS = [o.strip() for o in _origins.split(",") if o.strip()]
 
-app = FastAPI(title="RestBar Dashboard API - Core MultiTenant", version="1.3")
+app = FastAPI(title="SwissTools Pos — API dashboard", version="1.3")
 
 
 @app.on_event("startup")
@@ -744,7 +744,7 @@ def swiss_admin_update_dashboard_user_access(
 
 @app.get("/")
 def home():
-    return {"status": "ok", "message": "RestBar Sync API Running"}
+    return {"status": "ok", "message": "SwissTools Pos API en ejecución"}
 
 
 @app.post("/auth/login", tags=["Auth"], response_model=schemas.TokenResponse)
@@ -783,17 +783,32 @@ def change_password(
     return {"status": "ok"}
 
 
-@app.get("/dashboard/resumen", tags=["Dashboard"])
-def dashboard_resumen(
+def _parse_date_iso(s: str):
+    return datetime.strptime(s[:10], "%Y-%m-%d").date()
+
+
+def _prev_period_dates(fecha_desde: str, fecha_hasta: str) -> tuple[str, str]:
+    d0 = _parse_date_iso(fecha_desde)
+    d1 = _parse_date_iso(fecha_hasta)
+    days = (d1 - d0).days + 1
+    prev_end = d0 - timedelta(days=1)
+    prev_start = prev_end - timedelta(days=days - 1)
+    return prev_start.isoformat(), prev_end.isoformat()
+
+
+def _pct_delta(cur: float, prev: float) -> Optional[float]:
+    if prev == 0:
+        return None if cur == 0 else None  # evitar infinito: sin referencia útil
+    return round(((cur - prev) / prev) * 100, 2)
+
+
+def _ventas_en_rango(
+    db: Session,
+    user: models.Usuario,
     fecha_desde: str,
     fecha_hasta: str,
-    sucursal_id: Optional[str] = None,
-    user: models.Usuario = Depends(get_current_user_dashboard),
-    db: Session = Depends(get_db),
-):
-    """
-    KPIs y series para el dashboard. Admin ve todas las sucursales; visor solo las asignadas en usuario_sucursales.
-    """
+    sucursal_id: Optional[str],
+) -> List[models.Venta]:
     q = db.query(models.Venta).join(models.Sucursal, models.Venta.sucursal_id == models.Sucursal.id)
 
     if not user.is_admin:
@@ -804,33 +819,30 @@ def dashboard_resumen(
             .all()
         ]
         if not allowed_ids:
-            return {
-                "total_ingresos": 0.0,
-                "num_tickets": 0,
-                "ticket_promedio": 0.0,
-                "total_efectivo": 0.0,
-                "total_tarjeta": 0.0,
-                "por_hora": [],
-                "por_metodo": [],
-            }
+            return []
         q = q.filter(models.Venta.sucursal_id.in_(allowed_ids))
 
     if sucursal_id:
         q = q.filter(models.Venta.sucursal_id == sucursal_id)
 
     q = q.filter(models.Venta.fecha >= fecha_desde, models.Venta.fecha <= fecha_hasta)
+    return q.all()
 
-    ventas: List[models.Venta] = q.all()
+
+def _resumen_from_ventas(ventas: List[models.Venta]) -> dict[str, Any]:
+    empty = {
+        "total_ingresos": 0.0,
+        "num_tickets": 0,
+        "ticket_promedio": 0.0,
+        "total_efectivo": 0.0,
+        "total_tarjeta": 0.0,
+        "por_hora": [],
+        "por_metodo": [],
+        "por_dia": [],
+        "top_productos": [],
+    }
     if not ventas:
-        return {
-            "total_ingresos": 0.0,
-            "num_tickets": 0,
-            "ticket_promedio": 0.0,
-            "total_efectivo": 0.0,
-            "total_tarjeta": 0.0,
-            "por_hora": [],
-            "por_metodo": [],
-        }
+        return empty
 
     total_ingresos = sum(v.total_pagado or 0 for v in ventas)
     num = len(ventas)
@@ -852,6 +864,60 @@ def dashboard_resumen(
     por_hora_list = [{"name": f"{h}", "ventas": round(por_hora[h], 2)} for h in hora_sorted]
     por_metodo = [{"name": k, "amount": round(metodo_map[k], 2)} for k in sorted(metodo_map, key=lambda x: -metodo_map[x])]
 
+    por_dia_acc: dict[str, dict[str, Any]] = {}
+    for v in ventas:
+        f = (v.fecha or "").strip() or ""
+        if f not in por_dia_acc:
+            por_dia_acc[f] = {
+                "fecha": f,
+                "total_pagado": 0.0,
+                "num_tickets": 0,
+                "total_efectivo": 0.0,
+                "total_tarjeta": 0.0,
+            }
+        por_dia_acc[f]["total_pagado"] += float(v.total_pagado or 0)
+        por_dia_acc[f]["num_tickets"] += 1
+        por_dia_acc[f]["total_efectivo"] += float(v.monto_efectivo or 0)
+        por_dia_acc[f]["total_tarjeta"] += float(v.monto_tarjeta or 0)
+    por_dia_sorted = sorted(por_dia_acc.keys())
+    por_dia_list = [
+        {
+            "fecha": por_dia_acc[f]["fecha"],
+            "total_pagado": round(por_dia_acc[f]["total_pagado"], 2),
+            "num_tickets": por_dia_acc[f]["num_tickets"],
+            "total_efectivo": round(por_dia_acc[f]["total_efectivo"], 2),
+            "total_tarjeta": round(por_dia_acc[f]["total_tarjeta"], 2),
+        }
+        for f in por_dia_sorted
+    ]
+
+    prod_acc: dict[str, dict[str, Any]] = {}
+    for v in ventas:
+        for item in v.detalles or []:
+            if not isinstance(item, dict):
+                continue
+            desc = (str(item.get("descripcion") or "")).strip()
+            cod = (str(item.get("codigo") or "")).strip()
+            nombre = desc or cod or "Sin descripción"
+            key = desc or cod or nombre
+            tr = float(item.get("total_renglon") or 0)
+            cant = float(item.get("cantidad") or 0)
+            if key not in prod_acc:
+                prod_acc[key] = {"nombre": nombre, "codigo": cod or None, "total_renglon": 0.0, "cantidad": 0.0}
+            prod_acc[key]["total_renglon"] += tr
+            prod_acc[key]["cantidad"] += cant
+
+    top_sorted = sorted(prod_acc.values(), key=lambda x: -x["total_renglon"])[:20]
+    top_productos = [
+        {
+            "nombre": p["nombre"],
+            "codigo": p["codigo"],
+            "total_renglon": round(p["total_renglon"], 2),
+            "cantidad": round(p["cantidad"], 3),
+        }
+        for p in top_sorted
+    ]
+
     return {
         "total_ingresos": round(total_ingresos, 2),
         "num_tickets": num,
@@ -860,7 +926,38 @@ def dashboard_resumen(
         "total_tarjeta": round(total_tarjeta, 2),
         "por_hora": por_hora_list,
         "por_metodo": por_metodo[:12],
+        "por_dia": por_dia_list,
+        "top_productos": top_productos,
     }
+
+
+@app.get("/dashboard/resumen", tags=["Dashboard"])
+def dashboard_resumen(
+    fecha_desde: str,
+    fecha_hasta: str,
+    sucursal_id: Optional[str] = None,
+    include_previous: bool = False,
+    user: models.Usuario = Depends(get_current_user_dashboard),
+    db: Session = Depends(get_db),
+):
+    """
+    KPIs y series para el dashboard. Admin ve todas las sucursales; visor solo las asignadas en usuario_sucursales.
+    Incluye por_dia, top_productos (desde detalles JSON) y deltas opcionales vs el periodo anterior de igual duración.
+    """
+    ventas = _ventas_en_rango(db, user, fecha_desde, fecha_hasta, sucursal_id)
+    out = _resumen_from_ventas(ventas)
+
+    if include_previous:
+        pd, ph = _prev_period_dates(fecha_desde, fecha_hasta)
+        prev_ventas = _ventas_en_rango(db, user, pd, ph, sucursal_id)
+        prev = _resumen_from_ventas(prev_ventas)
+        out["deltas"] = {
+            "total_ingresos_pct": _pct_delta(out["total_ingresos"], prev["total_ingresos"]),
+            "num_tickets_pct": _pct_delta(float(out["num_tickets"]), float(prev["num_tickets"])),
+            "ticket_promedio_pct": _pct_delta(out["ticket_promedio"], prev["ticket_promedio"]),
+        }
+
+    return out
 
 
 @app.get("/dashboard/sucursales", tags=["Dashboard"])

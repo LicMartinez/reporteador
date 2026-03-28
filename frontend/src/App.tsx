@@ -1,7 +1,12 @@
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import Login from './pages/Login';
-import Dashboard from './pages/Dashboard';
+import DashboardLayout from './components/dashboard/DashboardLayout';
+import ResumenPage from './pages/dashboard/ResumenPage';
+import VentasPage from './pages/dashboard/VentasPage';
+import ProductosPage from './pages/dashboard/ProductosPage';
+import MeserosPage from './pages/dashboard/MeserosPage';
+import PagosPage from './pages/dashboard/PagosPage';
 import SwissAdminPortal from './pages/SwissAdminPortal';
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
@@ -37,10 +42,16 @@ function AppRoutes() {
         path="/"
         element={
           <PrivateRoute>
-            <Dashboard />
+            <DashboardLayout />
           </PrivateRoute>
         }
-      />
+      >
+        <Route index element={<ResumenPage />} />
+        <Route path="ventas" element={<VentasPage />} />
+        <Route path="productos" element={<ProductosPage />} />
+        <Route path="meseros" element={<MeserosPage />} />
+        <Route path="pagos" element={<PagosPage />} />
+      </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );
