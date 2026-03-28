@@ -5,6 +5,7 @@ Backend **FastAPI** + frontend **React (Vite)** + base **PostgreSQL en Supabase*
 ## Documentación
 
 - **`DEPLOY_MVP.md`** — Retrospectiva, GitHub → Render → Vercel, Supabase, variables de entorno.
+- **`docs/VERCEL_DESPLIEGUE.md`** — Cómo publicar el frontend en Vercel (CLI, monorepo, por qué producción puede quedarse en versión vieja).
 - **`BUILD_AGENT.md`** — Compilación manual del instalador **Dashboard Sync SW** (PyInstaller + Inno Setup).
 - **`docs/AGENTE_WINDOWS.md`** — Uso del agente de sincronización en sucursal.
 - **`GUIA_RESTBAR_DASHBOARD.md`** — Dominio DBF, ETL y arquitectura funcional.

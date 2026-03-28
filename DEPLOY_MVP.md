@@ -86,6 +86,8 @@ Cada `git push` a `main` puede activar **auto-deploy** si lo habilitas en el ser
 
 En Vercel → Add New Project → importa el **mismo** repositorio; **Root Directory** = `frontend` y variable `VITE_API_URL` apuntando a la URL que te dio Render.
 
+**Despliegue del dashboard (flujo real y trampas):** ver **`docs/VERCEL_DESPLIEGUE.md`**. Ahí se explica que la publicación a producción se hace con **Vercel CLI** (no se asume que solo `git push` actualice el sitio), por qué a veces se ve una versión antigua aunque GitHub esté al día, y el tema del **monorepo** (`vercel.json` en la raíz vs Root Directory `frontend`).
+
 > **Nota:** `.cursor/mcp.json` está en `.gitignore` para no subir tokens. La plantilla sin secretos es `.cursor/mcp.json.example`.
 
 ---
