@@ -1,6 +1,6 @@
 import os
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, List, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
@@ -1109,6 +1109,69 @@ def _acumular_pagos_en_map(v: Any, metodo_map: dict[str, float]) -> None:
     metodo_map["Efectivo"] += float(v.monto_efectivo or 0)
 
 
+def _detalle_line_costo(item: dict) -> float:
+    for k in ("costo_renglon", "cosven"):
+        v = item.get(k)
+        if v is not None:
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                pass
+    return 0.0
+
+
+def _bucket_hora_par(hour: int) -> str:
+    h = max(0, min(23, int(hour)))
+    b = (h // 2) * 2
+    return f"{b:02d}:00"
+
+
+_WD_LABELS = ("Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom")
+
+
+def _estimar_comisiones_tarjetas(metodo_map: dict[str, float]) -> dict[str, Any]:
+    detalle: list[dict[str, Any]] = []
+    for name, amt in metodo_map.items():
+        amt_f = float(amt)
+        if amt_f <= 0:
+            continue
+        n = str(name).upper().strip()
+        rate = 0.0
+        if n == "EFECTIVO" or (n.startswith("EFECT") and "TAR" not in n):
+            rate = 0.0
+        elif "AMEX" in n or "AMERICAN" in n:
+            rate = 0.042
+        elif "DEBITO" in n or "DÉBITO" in n or n.startswith("TD"):
+            rate = 0.015
+        elif (
+            "CREDITO" in n
+            or "CRÉDITO" in n
+            or n.startswith("TC")
+            or "VISA" in n
+            or "MASTERCARD" in n
+            or "MASTER" in n
+        ):
+            rate = 0.0225
+        if rate <= 0:
+            continue
+        com = round(amt_f * rate, 2)
+        detalle.append(
+            {
+                "metodo": name,
+                "monto": round(amt_f, 2),
+                "tasa_pct": round(rate * 100, 2),
+                "comision": com,
+            }
+        )
+    base = round(sum(d["monto"] for d in detalle), 2)
+    total_com = round(sum(d["comision"] for d in detalle), 2)
+    return {
+        "total_comision": total_com,
+        "base_tarjeta": base,
+        "detalle": detalle,
+    }
+
+
 def _resumen_from_ventas(ventas: List[Any]) -> dict[str, Any]:
     empty = {
         "total_ingresos": 0.0,
@@ -1116,12 +1179,20 @@ def _resumen_from_ventas(ventas: List[Any]) -> dict[str, Any]:
         "ticket_promedio": 0.0,
         "total_efectivo": 0.0,
         "total_tarjeta": 0.0,
+        "total_costo": 0.0,
+        "utilidad_bruta": 0.0,
+        "margen_pct": None,
+        "total_propinas": 0.0,
+        "total_anulaciones_monto": 0.0,
         "por_hora": [],
+        "por_hora_semana": [],
         "por_metodo": [],
         "por_dia": [],
         "top_productos": [],
         "por_mesero": [],
         "por_clase": [],
+        "resumen_financiero": None,
+        "comisiones_estimadas": None,
     }
     if not ventas:
         return empty
@@ -1130,15 +1201,58 @@ def _resumen_from_ventas(ventas: List[Any]) -> dict[str, Any]:
     num = len(ventas)
     total_efectivo = sum(_montos_efectivo_tarjeta_row(v)[0] for v in ventas)
     total_tarjeta = sum(_montos_efectivo_tarjeta_row(v)[1] for v in ventas)
+    total_propinas = sum(float(getattr(v, "propinas", None) or 0) for v in ventas)
+
+    total_costo = 0.0
+    for v in ventas:
+        for item in v.detalles or []:
+            if isinstance(item, dict):
+                total_costo += _detalle_line_costo(item)
+
+    utilidad_bruta = total_ingresos - total_costo
+    margen_pct: Optional[float] = None
+    if total_ingresos > 0 and total_costo > 0:
+        margen_pct = round((1.0 - total_costo / total_ingresos) * 100, 1)
+
+    ingreso_neto_iva = total_ingresos / 1.16 if total_ingresos else 0.0
+    iva_estimado = total_ingresos - ingreso_neto_iva if total_ingresos else 0.0
 
     por_hora: dict[str, float] = defaultdict(float)
+    slot_week: dict[str, list[float]] = defaultdict(lambda: [0.0] * 7)
+
     for v in ventas:
         h = (v.hora or "").strip()[:5] or "00:00"
         por_hora[h] += float(v.total_pagado or 0)
 
+        fstr = (v.fecha or "").strip()[:10]
+        if fstr:
+            try:
+                wd = date.fromisoformat(fstr).weekday()
+            except ValueError:
+                wd = None
+            if wd is not None:
+                hparts = (v.hora or "00:00").replace(".", ":").split(":")
+                try:
+                    hh = int(hparts[0]) if hparts and str(hparts[0]).strip() != "" else 0
+                except ValueError:
+                    hh = 0
+                slot = _bucket_hora_par(hh)
+                slot_week[slot][wd] += float(v.total_pagado or 0)
+
     metodo_map: dict[str, float] = defaultdict(float)
     for v in ventas:
         _acumular_pagos_en_map(v, metodo_map)
+
+    comisiones_info = _estimar_comisiones_tarjetas(dict(metodo_map))
+    resumen_financiero = {
+        "ingreso_bruto": round(total_ingresos, 2),
+        "iva_estimado": round(iva_estimado, 2),
+        "ingreso_neto": round(ingreso_neto_iva, 2),
+        "costo_ventas": round(total_costo, 2),
+        "utilidad_bruta": round(utilidad_bruta, 2),
+        "comisiones_tarjeta": comisiones_info["total_comision"],
+        "propinas_total": round(total_propinas, 2),
+    }
 
     hora_sorted = sorted(por_hora.keys())
     por_hora_list = [{"name": f"{h}", "ventas": round(por_hora[h], 2)} for h in hora_sorted]
@@ -1155,11 +1269,16 @@ def _resumen_from_ventas(ventas: List[Any]) -> dict[str, Any]:
                 "num_tickets": 0,
                 "total_efectivo": 0.0,
                 "total_tarjeta": 0.0,
+                "total_costo": 0.0,
             }
         por_dia_acc[f]["total_pagado"] += float(v.total_pagado or 0)
         por_dia_acc[f]["num_tickets"] += 1
         por_dia_acc[f]["total_efectivo"] += ef
         por_dia_acc[f]["total_tarjeta"] += tar
+        for item in v.detalles or []:
+            if isinstance(item, dict):
+                por_dia_acc[f]["total_costo"] += _detalle_line_costo(item)
+
     por_dia_sorted = sorted(por_dia_acc.keys())
     por_dia_list = [
         {
@@ -1168,9 +1287,27 @@ def _resumen_from_ventas(ventas: List[Any]) -> dict[str, Any]:
             "num_tickets": por_dia_acc[f]["num_tickets"],
             "total_efectivo": round(por_dia_acc[f]["total_efectivo"], 2),
             "total_tarjeta": round(por_dia_acc[f]["total_tarjeta"], 2),
+            "total_costo": round(por_dia_acc[f]["total_costo"], 2),
         }
         for f in por_dia_sorted
     ]
+
+    def _slot_sort_key(s: str) -> int:
+        try:
+            return int(s.split(":")[0])
+        except (ValueError, IndexError):
+            return 0
+
+    por_hora_semana: list[dict[str, Any]] = []
+    for slot in sorted(slot_week.keys(), key=_slot_sort_key):
+        vals = slot_week[slot]
+        if sum(vals) <= 0:
+            continue
+        row: dict[str, Any] = {"hora": slot}
+        for i, lab in enumerate(_WD_LABELS):
+            if vals[i] > 0:
+                row[lab] = round(vals[i], 2)
+        por_hora_semana.append(row)
 
     prod_acc: dict[str, dict[str, Any]] = {}
     clase_acc: dict[int, dict[str, Any]] = {}
@@ -1186,9 +1323,17 @@ def _resumen_from_ventas(ventas: List[Any]) -> dict[str, Any]:
             key = desc or cod or nombre
             tr = float(item.get("total_renglon") or 0)
             cant = float(item.get("cantidad") or 0)
+            c_line = _detalle_line_costo(item)
             if key not in prod_acc:
-                prod_acc[key] = {"nombre": nombre, "codigo": cod or None, "total_renglon": 0.0, "cantidad": 0.0}
+                prod_acc[key] = {
+                    "nombre": nombre,
+                    "codigo": cod or None,
+                    "total_renglon": 0.0,
+                    "total_costo": 0.0,
+                    "cantidad": 0.0,
+                }
             prod_acc[key]["total_renglon"] += tr
+            prod_acc[key]["total_costo"] += c_line
             prod_acc[key]["cantidad"] += cant
 
             clase_raw = item.get("clase")
@@ -1203,15 +1348,23 @@ def _resumen_from_ventas(ventas: List[Any]) -> dict[str, Any]:
                 clase_acc[clase_i]["cantidad"] += cant
 
     top_sorted = sorted(prod_acc.values(), key=lambda x: -x["total_renglon"])[:20]
-    top_productos = [
-        {
-            "nombre": p["nombre"],
-            "codigo": p["codigo"],
-            "total_renglon": round(p["total_renglon"], 2),
-            "cantidad": round(p["cantidad"], 3),
-        }
-        for p in top_sorted
-    ]
+    top_productos = []
+    for p in top_sorted:
+        trn = p["total_renglon"]
+        tc = p["total_costo"]
+        m_pct = None
+        if trn > 0 and tc > 0:
+            m_pct = round((1.0 - tc / trn) * 100, 1)
+        top_productos.append(
+            {
+                "nombre": p["nombre"],
+                "codigo": p["codigo"],
+                "total_renglon": round(trn, 2),
+                "total_costo": round(tc, 2),
+                "margen_pct": m_pct,
+                "cantidad": round(p["cantidad"], 3),
+            }
+        )
 
     mesero_acc: dict[str, dict[str, Any]] = {}
     for v in ventas:
@@ -1219,21 +1372,28 @@ def _resumen_from_ventas(ventas: List[Any]) -> dict[str, Any]:
         if not cod:
             continue
         nom = (getattr(v, "mesero_nombre", None) or "").strip() or cod
+        tip = float(getattr(v, "propinas", None) or 0)
         if cod not in mesero_acc:
-            mesero_acc[cod] = {"codigo": cod, "nombre": nom, "total_pagado": 0.0, "num_tickets": 0}
+            mesero_acc[cod] = {"codigo": cod, "nombre": nom, "total_pagado": 0.0, "num_tickets": 0, "propinas": 0.0}
         mesero_acc[cod]["total_pagado"] += float(v.total_pagado or 0)
         mesero_acc[cod]["num_tickets"] += 1
+        mesero_acc[cod]["propinas"] += tip
 
     por_mesero = sorted(mesero_acc.values(), key=lambda x: -x["total_pagado"])[:30]
-    por_mesero = [
-        {
-            "codigo": m["codigo"],
-            "nombre": m["nombre"],
-            "total_pagado": round(m["total_pagado"], 2),
-            "num_tickets": m["num_tickets"],
-        }
-        for m in por_mesero
-    ]
+    por_mesero_out: list[dict[str, Any]] = []
+    for m in por_mesero:
+        tp = m["total_pagado"]
+        nt = m["num_tickets"]
+        por_mesero_out.append(
+            {
+                "codigo": m["codigo"],
+                "nombre": m["nombre"],
+                "total_pagado": round(tp, 2),
+                "num_tickets": nt,
+                "propinas": round(m["propinas"], 2),
+                "ticket_promedio": round(tp / nt, 2) if nt else 0.0,
+            }
+        )
 
     por_clase = sorted(
         [
@@ -1253,12 +1413,20 @@ def _resumen_from_ventas(ventas: List[Any]) -> dict[str, Any]:
         "ticket_promedio": round(total_ingresos / num, 2) if num else 0.0,
         "total_efectivo": round(total_efectivo, 2),
         "total_tarjeta": round(total_tarjeta, 2),
+        "total_costo": round(total_costo, 2),
+        "utilidad_bruta": round(utilidad_bruta, 2),
+        "margen_pct": margen_pct,
+        "total_propinas": round(total_propinas, 2),
+        "total_anulaciones_monto": 0.0,
         "por_hora": por_hora_list,
+        "por_hora_semana": por_hora_semana,
         "por_metodo": por_metodo[:12],
         "por_dia": por_dia_list,
         "top_productos": top_productos,
-        "por_mesero": por_mesero,
+        "por_mesero": por_mesero_out,
         "por_clase": por_clase,
+        "resumen_financiero": resumen_financiero,
+        "comisiones_estimadas": comisiones_info,
     }
 
 
@@ -1286,6 +1454,9 @@ def dashboard_resumen(
             "total_ingresos_pct": _pct_delta(out["total_ingresos"], prev["total_ingresos"]),
             "num_tickets_pct": _pct_delta(float(out["num_tickets"]), float(prev["num_tickets"])),
             "ticket_promedio_pct": _pct_delta(out["ticket_promedio"], prev["ticket_promedio"]),
+            "total_costo_pct": _pct_delta(out.get("total_costo", 0.0), prev.get("total_costo", 0.0)),
+            "utilidad_bruta_pct": _pct_delta(out.get("utilidad_bruta", 0.0), prev.get("utilidad_bruta", 0.0)),
+            "total_propinas_pct": _pct_delta(out.get("total_propinas", 0.0), prev.get("total_propinas", 0.0)),
         }
 
     return out
@@ -1424,6 +1595,7 @@ def _sync_payload_to_venta_kwargs(v: dict) -> dict[str, Any]:
         "pagos": v.get("pagos"),
         "mesero_codigo": v.get("mesero_codigo"),
         "mesero_nombre": v.get("mesero_nombre"),
+        "propinas": v.get("propinas"),
         "detalles": v.get("detalles", []),
     }
 

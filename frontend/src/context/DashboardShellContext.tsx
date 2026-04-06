@@ -49,9 +49,14 @@ function normalizeResumen(raw: Resumen | null): Resumen | null {
     por_dia: raw.por_dia ?? [],
     top_productos: raw.top_productos ?? [],
     por_hora: raw.por_hora ?? [],
+    por_hora_semana: raw.por_hora_semana ?? [],
     por_metodo: raw.por_metodo ?? [],
     por_mesero: raw.por_mesero ?? [],
     por_clase: raw.por_clase ?? [],
+    total_costo: raw.total_costo ?? 0,
+    utilidad_bruta: raw.utilidad_bruta ?? 0,
+    total_propinas: raw.total_propinas ?? 0,
+    total_anulaciones_monto: raw.total_anulaciones_monto ?? 0,
   };
 }
 

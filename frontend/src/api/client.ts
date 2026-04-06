@@ -46,6 +46,7 @@ export type ResumenPorDia = {
   num_tickets: number;
   total_efectivo: number;
   total_tarjeta: number;
+  total_costo?: number;
 };
 
 export type ResumenTopProducto = {
@@ -53,12 +54,17 @@ export type ResumenTopProducto = {
   codigo: string | null;
   total_renglon: number;
   cantidad: number;
+  total_costo?: number;
+  margen_pct?: number | null;
 };
 
 export type ResumenDeltas = {
   total_ingresos_pct: number | null;
   num_tickets_pct: number | null;
   ticket_promedio_pct: number | null;
+  total_costo_pct?: number | null;
+  utilidad_bruta_pct?: number | null;
+  total_propinas_pct?: number | null;
 };
 
 export type ResumenMesero = {
@@ -66,6 +72,8 @@ export type ResumenMesero = {
   nombre: string;
   total_pagado: number;
   num_tickets: number;
+  propinas?: number;
+  ticket_promedio?: number;
 };
 
 export type ResumenClase = {
@@ -74,18 +82,53 @@ export type ResumenClase = {
   cantidad: number;
 };
 
+export type ResumenFinanciero = {
+  ingreso_bruto: number;
+  iva_estimado: number;
+  ingreso_neto: number;
+  costo_ventas: number;
+  utilidad_bruta: number;
+  comisiones_tarjeta: number;
+  propinas_total: number;
+};
+
+export type ComisionesEstimadas = {
+  total_comision: number;
+  base_tarjeta: number;
+  detalle: { metodo: string; monto: number; tasa_pct: number; comision: number }[];
+};
+
+export type ResumenPorHoraSemana = {
+  hora: string;
+  Lun?: number;
+  Mar?: number;
+  Mié?: number;
+  Jue?: number;
+  Vie?: number;
+  Sáb?: number;
+  Dom?: number;
+};
+
 export type Resumen = {
   total_ingresos: number;
   num_tickets: number;
   ticket_promedio: number;
   total_efectivo: number;
   total_tarjeta: number;
+  total_costo?: number;
+  utilidad_bruta?: number;
+  margen_pct?: number | null;
+  total_propinas?: number;
+  total_anulaciones_monto?: number;
   por_hora: { name: string; ventas: number }[];
+  por_hora_semana?: ResumenPorHoraSemana[];
   por_metodo: { name: string; amount: number }[];
   por_dia: ResumenPorDia[];
   top_productos: ResumenTopProducto[];
   por_mesero?: ResumenMesero[];
   por_clase?: ResumenClase[];
+  resumen_financiero?: ResumenFinanciero | null;
+  comisiones_estimadas?: ComisionesEstimadas | null;
   deltas?: ResumenDeltas | null;
 };
 

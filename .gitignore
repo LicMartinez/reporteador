@@ -27,3 +27,4 @@ estructura_restbar.json
 *.docx
 
 output_installer/
+.vercel

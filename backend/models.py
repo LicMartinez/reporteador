@@ -120,6 +120,7 @@ class Venta(Base):
     pagos = Column(JSON, nullable=True)
     mesero_codigo = Column(String, nullable=True)
     mesero_nombre = Column(String, nullable=True)
+    propinas = Column(Float, nullable=True)
 
     # Json para renglones (productos)
     detalles = Column(JSON, default=list)
@@ -150,6 +151,7 @@ class VentaTurno(Base):
     pagos = Column(JSON, nullable=True)
     mesero_codigo = Column(String, nullable=True)
     mesero_nombre = Column(String, nullable=True)
+    propinas = Column(Float, nullable=True)
     detalles = Column(JSON, default=list)
 
     sucursal = relationship("Sucursal", back_populates="ventas_turno")

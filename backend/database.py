@@ -51,6 +51,8 @@ def ensure_schema_columns() -> None:
                 out.append(f"ALTER TABLE {table} ADD COLUMN mesero_codigo VARCHAR")
             if "mesero_nombre" not in cols:
                 out.append(f"ALTER TABLE {table} ADD COLUMN mesero_nombre VARCHAR")
+            if "propinas" not in cols:
+                out.append(f"ALTER TABLE {table} ADD COLUMN propinas {'REAL' if is_sqlite else 'DOUBLE PRECISION'}")
             return out
 
         for tbl in ("ventas", "ventas_turno"):

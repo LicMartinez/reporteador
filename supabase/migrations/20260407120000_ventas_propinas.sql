@@ -1,0 +1,7 @@
+-- Propinas por ticket (FACTURA1.TIPS) en histórico y turno.
+BEGIN;
+
+ALTER TABLE ventas ADD COLUMN IF NOT EXISTS propinas DOUBLE PRECISION;
+ALTER TABLE ventas_turno ADD COLUMN IF NOT EXISTS propinas DOUBLE PRECISION;
+
+COMMIT;

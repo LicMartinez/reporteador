@@ -265,6 +265,12 @@ def _detalle_line(d: dict) -> dict:
         c = 0
     if c in (1, 2):
         line["clase"] = c
+    cos = d.get("COSVEN")
+    if cos is not None:
+        try:
+            line["costo_renglon"] = float(cos)
+        except (TypeError, ValueError):
+            pass
     return line
 
 
@@ -310,6 +316,7 @@ def build_venta_payload(
         "pagos": pagos,
         "mesero_codigo": mesero_cod or None,
         "mesero_nombre": mesero_nombre,
+        "propinas": _float(f1item.get("TIPS")),
         "detalles": detalles,
     }
 
