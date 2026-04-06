@@ -50,6 +50,8 @@ function normalizeResumen(raw: Resumen | null): Resumen | null {
     top_productos: raw.top_productos ?? [],
     por_hora: raw.por_hora ?? [],
     por_metodo: raw.por_metodo ?? [],
+    por_mesero: raw.por_mesero ?? [],
+    por_clase: raw.por_clase ?? [],
   };
 }
 

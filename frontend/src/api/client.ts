@@ -61,6 +61,19 @@ export type ResumenDeltas = {
   ticket_promedio_pct: number | null;
 };
 
+export type ResumenMesero = {
+  codigo: string;
+  nombre: string;
+  total_pagado: number;
+  num_tickets: number;
+};
+
+export type ResumenClase = {
+  name: string;
+  total_renglon: number;
+  cantidad: number;
+};
+
 export type Resumen = {
   total_ingresos: number;
   num_tickets: number;
@@ -71,6 +84,8 @@ export type Resumen = {
   por_metodo: { name: string; amount: number }[];
   por_dia: ResumenPorDia[];
   top_productos: ResumenTopProducto[];
+  por_mesero?: ResumenMesero[];
+  por_clase?: ResumenClase[];
   deltas?: ResumenDeltas | null;
 };
 
@@ -122,6 +137,14 @@ export type SwissAdminUserBrief = {
   sucursales: { id: string; nombre: string; rol?: string | null }[];
 };
 
+export type VentasImportadasPurgeResult = {
+  status: string;
+  registros_retirados: number;
+  ventas_turno_eliminadas: number;
+  modo: string;
+  sucursal_nombre: string;
+};
+
 export async function fetchSwissSucursales() {
   const { data } = await api.get<SwissSucursalBrief[]>('/swiss-admin/sucursales');
   return data;
@@ -139,6 +162,27 @@ export async function fetchSwissSucursalLogs(sucursal_id: string, limit = 50) {
   const { data } = await api.get<SwissSucursalLogsItem[]>(`/swiss-admin/sucursales/${sucursal_id}/logs`, {
     params: { limit },
   });
+  return data;
+}
+
+export async function deleteSwissSucursalVentasImportadas(
+  sucursal_id: string,
+  body: {
+    modo: 'completo' | 'rango';
+    fecha_desde?: string;
+    fecha_hasta?: string;
+  }
+) {
+  const { data } = await api.delete<VentasImportadasPurgeResult>(
+    `/swiss-admin/sucursales/${sucursal_id}/ventas-importadas`,
+    {
+      params: {
+        modo: body.modo,
+        ...(body.fecha_desde ? { fecha_desde: body.fecha_desde } : {}),
+        ...(body.fecha_hasta ? { fecha_hasta: body.fecha_hasta } : {}),
+      },
+    }
+  );
   return data;
 }
 
@@ -163,6 +207,24 @@ export async function patchSwissDashboardUserAccess(user_id: string, dashboard_a
   const { data } = await api.patch<SwissAdminUserBrief>(`/swiss-admin/users/${user_id}/access`, {
     dashboard_access_until: dashboard_access_until ?? null,
   });
+  return data;
+}
+
+export async function patchSwissDashboardUser(
+  user_id: string,
+  body: {
+    password?: string;
+    nombre?: string | null;
+    sucursal_ids?: string[];
+    catalogo_maestro_id?: string | null;
+  }
+) {
+  const payload: Record<string, unknown> = {};
+  if (body.password !== undefined && body.password !== '') payload.password = body.password;
+  if (body.nombre !== undefined) payload.nombre = body.nombre;
+  if (body.sucursal_ids !== undefined) payload.sucursal_ids = body.sucursal_ids;
+  if (body.catalogo_maestro_id !== undefined) payload.catalogo_maestro_id = body.catalogo_maestro_id;
+  const { data } = await api.patch<SwissAdminUserBrief>(`/swiss-admin/users/${user_id}`, payload);
   return data;
 }
 

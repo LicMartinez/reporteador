@@ -132,12 +132,37 @@ def main() -> None:
             return
         try:
             r = httpx.get(url + "/", timeout=15.0)
-            if r.status_code == 200:
-                messagebox.showinfo("API", "Respuesta OK del servidor.")
-            else:
-                messagebox.showwarning("API", f"HTTP {r.status_code}")
+            if r.status_code != 200:
+                messagebox.showwarning("API", f"GET raíz: HTTP {r.status_code}")
+                return
         except Exception as e:
             messagebox.showerror("API", f"No se pudo conectar: {e}")
+            return
+
+        suc = nom_var.get().strip()
+        pwd = pwd_var.get()
+        if not suc or not pwd:
+            messagebox.showinfo(
+                "API",
+                "Servidor alcanzable (GET /).\n"
+                "Para probar credenciales de sync, rellene nombre de sucursal y contraseña.",
+            )
+            return
+
+        try:
+            up = f"{url}/sync/upload/{suc}"
+            headers = {"X-Sucursal-Password": pwd}
+            key = key_var.get().strip()
+            if key:
+                headers["X-API-Key"] = key
+            r2 = httpx.post(up, json={"historial": []}, headers=headers, timeout=45.0)
+            if r2.status_code == 200:
+                messagebox.showinfo("API", f"Sync OK: {r2.text[:500]}")
+            else:
+                body = (r2.text or "")[:900]
+                messagebox.showwarning("API", f"POST sync/upload → HTTP {r2.status_code}\n{body}")
+        except Exception as e:
+            messagebox.showerror("API", f"Error en POST sync: {e}")
 
     _busy = {"v": False}
 

@@ -46,6 +46,7 @@ class Sucursal(Base):
     last_connection_at = Column(DateTime, nullable=True)
     
     ventas = relationship("Venta", back_populates="sucursal")
+    ventas_turno = relationship("VentaTurno", back_populates="sucursal", cascade="all, delete-orphan")
     logs = relationship("LogSync", back_populates="sucursal")
     usuarios_acceso = relationship("UsuarioSucursal", back_populates="sucursal")
 
@@ -115,12 +116,43 @@ class Venta(Base):
     metodo_pago_tarjeta = Column(String)
     monto_tarjeta = Column(Float)
     monto_efectivo = Column(Float)
-    
+    # Desglose de pagos: [{"name": str, "amount": float, "kind": "efectivo"|"tarjeta"|"otro"}]
+    pagos = Column(JSON, nullable=True)
+    mesero_codigo = Column(String, nullable=True)
+    mesero_nombre = Column(String, nullable=True)
+
     # Json para renglones (productos)
-    detalles = Column(JSON, default=list) 
-    
+    detalles = Column(JSON, default=list)
+
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     sucursal = relationship("Sucursal", back_populates="ventas")
+
+
+class VentaTurno(Base):
+    """
+    Tickets del turno en curso (FACTURA1T/2T). Se reemplazan en cada sync con `turno_actual`.
+    No deben duplicar órdenes ya persistidos en `ventas` (histórico).
+    """
+
+    __tablename__ = "ventas_turno"
+
+    id = Column(String, primary_key=True, index=True)
+    sucursal_id = Column(String, ForeignKey("sucursales.id"), index=True, nullable=False)
+    orden = Column(String, index=True, nullable=False)
+    factura = Column(String)
+    fecha = Column(String, index=True)
+    hora = Column(String)
+    total_pagado = Column(Float)
+    subtotal = Column(Float)
+    metodo_pago_tarjeta = Column(String)
+    monto_tarjeta = Column(Float)
+    monto_efectivo = Column(Float)
+    pagos = Column(JSON, nullable=True)
+    mesero_codigo = Column(String, nullable=True)
+    mesero_nombre = Column(String, nullable=True)
+    detalles = Column(JSON, default=list)
+
+    sucursal = relationship("Sucursal", back_populates="ventas_turno")
 
 class LogSync(Base):
     __tablename__ = "logs_sync"

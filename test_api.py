@@ -1,7 +1,22 @@
-from fastapi.testclient import TestClient
-from backend.main import app
-import json
+from types import SimpleNamespace
 
+from fastapi.testclient import TestClient
+
+from backend.deps import get_current_user
+from backend.main import app
+
+
+def _fake_maintenance_user():
+    return SimpleNamespace(
+        id="test-maintenance",
+        portal_admin=True,
+        is_admin=True,
+        email="test@local",
+        nombre=None,
+    )
+
+
+app.dependency_overrides[get_current_user] = _fake_maintenance_user
 client = TestClient(app)
 
 def test_flujos_fase2():

@@ -3,7 +3,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any, List, Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
@@ -11,7 +11,7 @@ from sqlalchemy.exc import IntegrityError
 
 import logging
 
-from .database import Base, engine, get_db
+from .database import Base, engine, get_db, ensure_schema_columns
 from . import models
 from .etl_matcher import ETLMatcher
 from .auth_core import create_access_token, verify_password, hash_password
@@ -31,6 +31,7 @@ def _on_startup():
     """Crea tablas si no existen. No mata el proceso si la DB tarda en responder."""
     try:
         Base.metadata.create_all(bind=engine)
+        ensure_schema_columns()
         logger.info("create_all OK — tablas verificadas")
     except Exception as exc:
         logger.error("create_all falló (se reintentará en la primera petición): %s", exc)
@@ -69,6 +70,68 @@ def _require_admin(user: models.Usuario) -> None:
     # Swiss Tools Dashboard Admon: acceso solo para usuarios con `portal_admin`.
     if not user.portal_admin:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No autorizado (admin requerido)")
+
+
+def _require_maintenance_access(user: models.Usuario) -> None:
+    """Borrado de ventas importadas: portal admin o admin del dashboard legado."""
+    if not (user.portal_admin or user.is_admin):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No autorizado para mantenimiento de datos sincronizados",
+        )
+
+
+def _purge_ventas_importadas(
+    db: Session,
+    sucursal: models.Sucursal,
+    *,
+    completo: bool,
+    fecha_desde: str | None,
+    fecha_hasta: str | None,
+    log_prefijo: str,
+) -> tuple[int, int]:
+    """
+    Borra ventas históricas (`ventas`). Si completo=True, también vacía `ventas_turno`.
+    Devuelve (filas_ventas_borradas, filas_turno_borradas).
+    """
+    turno_del = 0
+    qv = db.query(models.Venta).filter(models.Venta.sucursal_id == sucursal.id)
+
+    if completo:
+        turno_del = (
+            db.query(models.VentaTurno)
+            .filter(models.VentaTurno.sucursal_id == sucursal.id)
+            .delete(synchronize_session=False)
+        )
+        ventas_del = qv.delete(synchronize_session=False)
+    else:
+        if fecha_desde and fecha_hasta:
+            qv = qv.filter(models.Venta.fecha.between(fecha_desde.strip(), fecha_hasta.strip()))
+        elif fecha_desde:
+            qv = qv.filter(models.Venta.fecha >= fecha_desde.strip())
+        elif fecha_hasta:
+            qv = qv.filter(models.Venta.fecha <= fecha_hasta.strip())
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="En modo rango debes indicar al menos fecha_desde o fecha_hasta",
+            )
+        ventas_del = qv.delete(synchronize_session=False)
+
+    sucursal.ultimo_checkpoint_historico = None
+    msg = f"{log_prefijo} Borradas {ventas_del} venta(s) en histórico."
+    if turno_del:
+        msg += f" Eliminadas {turno_del} fila(s) de turno actual."
+    msg += " Checkpoint del agente reseteado."
+    db.add(
+        models.LogSync(
+            sucursal_id=sucursal.id,
+            tipo="Limpieza",
+            mensaje=msg,
+        )
+    )
+    db.commit()
+    return ventas_del, turno_del
 
 
 def _dt_to_iso(v: datetime | None) -> str | None:
@@ -165,6 +228,61 @@ def swiss_admin_sucursal_logs(
         )
         for log in logs
     ]
+
+
+@app.delete(
+    "/swiss-admin/sucursales/{sucursal_id}/ventas-importadas",
+    response_model=schemas.VentasImportadasPurgeResult,
+    tags=["SwissAdmin"],
+)
+def swiss_admin_purge_ventas_importadas(
+    sucursal_id: str,
+    modo: schemas.VentasImportadasPurgeModo = Query(..., description="completo = todo histórico + turno; rango = solo ventas en fechas"),
+    fecha_desde: str | None = Query(None, description="ISO fecha (YYYY-MM-DD), inclusive"),
+    fecha_hasta: str | None = Query(None, description="ISO fecha (YYYY-MM-DD), inclusive"),
+    user: models.Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Borra datos cargados por el agente de sync para una sucursal.
+    `completo`: vacía `ventas` y `ventas_turno` y resetea checkpoint.
+    `rango`: borra solo filas en `ventas` según fechas (al menos una fecha). No borra turno actual.
+    """
+    _require_admin(user)
+    sucursal = db.query(models.Sucursal).filter(models.Sucursal.id == sucursal_id).first()
+    if not sucursal:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sucursal no registrada")
+
+    if modo == schemas.VentasImportadasPurgeModo.completo:
+        ventas_del, turno_del = _purge_ventas_importadas(
+            db,
+            sucursal,
+            completo=True,
+            fecha_desde=None,
+            fecha_hasta=None,
+            log_prefijo="[Portal Swiss]",
+        )
+        modo_str = "completo"
+    else:
+        fd = fecha_desde.strip() if fecha_desde and fecha_desde.strip() else None
+        fh = fecha_hasta.strip() if fecha_hasta and fecha_hasta.strip() else None
+        ventas_del, turno_del = _purge_ventas_importadas(
+            db,
+            sucursal,
+            completo=False,
+            fecha_desde=fd,
+            fecha_hasta=fh,
+            log_prefijo="[Portal Swiss] Rango fechas.",
+        )
+        modo_str = "rango"
+
+    return schemas.VentasImportadasPurgeResult(
+        status="Limpiado",
+        registros_retirados=ventas_del,
+        ventas_turno_eliminadas=turno_del,
+        modo=modo_str,
+        sucursal_nombre=sucursal.nombre,
+    )
 
 
 @app.post("/swiss-admin/sucursales", response_model=schemas.SwissSucursalBrief, tags=["SwissAdmin"])
@@ -723,6 +841,10 @@ def swiss_admin_update_dashboard_user_access(
     db.commit()
     db.refresh(db_user)
 
+    return _swiss_user_brief_from_db(db, db_user)
+
+
+def _swiss_user_brief_from_db(db: Session, db_user: models.Usuario) -> schemas.SwissAdminUserBrief:
     links = (
         db.query(models.UsuarioSucursal, models.Sucursal)
         .join(models.Sucursal, models.Sucursal.id == models.UsuarioSucursal.sucursal_id)
@@ -730,7 +852,6 @@ def swiss_admin_update_dashboard_user_access(
         .all()
     )
     sucursales_out = [schemas.SucursalBrief(id=s.id, nombre=s.nombre, rol=link.rol) for link, s in links]
-
     return schemas.SwissAdminUserBrief(
         id=db_user.id,
         email=db_user.email,
@@ -740,6 +861,75 @@ def swiss_admin_update_dashboard_user_access(
         catalogo_maestro_id=db_user.catalogo_maestro_id,
         sucursales=sucursales_out,
     )
+
+
+@app.patch("/swiss-admin/users/{user_id}", response_model=schemas.SwissAdminUserBrief, tags=["SwissAdmin"])
+def swiss_admin_update_dashboard_user(
+    user_id: str,
+    body: schemas.SwissAdminUpdateDashboardUserRequest,
+    requester: models.Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _require_admin(requester)
+
+    db_user = db.query(models.Usuario).filter(models.Usuario.id == user_id, models.Usuario.portal_admin == False).first()
+    if not db_user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado")
+
+    data = body.model_dump(exclude_unset=True)
+    if not data:
+        return _swiss_user_brief_from_db(db, db_user)
+
+    if "password" in data and data["password"]:
+        db_user.password_hash = hash_password(data["password"])
+
+    if "nombre" in data:
+        raw_n = data["nombre"]
+        db_user.nombre = raw_n.strip() if isinstance(raw_n, str) and raw_n.strip() else None
+
+    if "catalogo_maestro_id" in data:
+        cid = data["catalogo_maestro_id"]
+        if cid:
+            cat = db.query(models.CatalogoMaestro).filter(models.CatalogoMaestro.id == cid).first()
+            if not cat:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="catalogo_maestro_id inválido")
+            db_user.catalogo_maestro_id = cid
+        else:
+            db_user.catalogo_maestro_id = None
+
+    if "sucursal_ids" in data:
+        ids = list(data["sucursal_ids"] or [])
+        if not ids:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Debe quedar al menos una sucursal asignada",
+            )
+        sucursales = db.query(models.Sucursal).filter(models.Sucursal.id.in_(ids)).all()
+        found_ids = {s.id for s in sucursales}
+        missing = [sid for sid in ids if sid not in found_ids]
+        if missing:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Sucursales no encontradas: {missing}")
+
+        db.query(models.UsuarioSucursal).filter(models.UsuarioSucursal.usuario_id == db_user.id).delete(
+            synchronize_session=False
+        )
+        for s in sucursales:
+            db.add(
+                models.UsuarioSucursal(
+                    usuario_id=db_user.id,
+                    sucursal_id=s.id,
+                    rol=models.PermisoNivel.VISOR.value,
+                )
+            )
+
+    try:
+        db.commit()
+        db.refresh(db_user)
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="No se pudo actualizar el usuario") from exc
+
+    return _swiss_user_brief_from_db(db, db_user)
 
 
 @app.get("/")
@@ -829,7 +1019,97 @@ def _ventas_en_rango(
     return q.all()
 
 
-def _resumen_from_ventas(ventas: List[models.Venta]) -> dict[str, Any]:
+def _ventas_turno_en_rango(
+    db: Session,
+    user: models.Usuario,
+    fecha_desde: str,
+    fecha_hasta: str,
+    sucursal_id: Optional[str],
+) -> List[models.VentaTurno]:
+    q = db.query(models.VentaTurno).join(models.Sucursal, models.VentaTurno.sucursal_id == models.Sucursal.id)
+
+    if not user.is_admin:
+        allowed_ids = [
+            row.sucursal_id
+            for row in db.query(models.UsuarioSucursal)
+            .filter(models.UsuarioSucursal.usuario_id == user.id)
+            .all()
+        ]
+        if not allowed_ids:
+            return []
+        q = q.filter(models.VentaTurno.sucursal_id.in_(allowed_ids))
+
+    if sucursal_id:
+        q = q.filter(models.VentaTurno.sucursal_id == sucursal_id)
+
+    q = q.filter(models.VentaTurno.fecha >= fecha_desde, models.VentaTurno.fecha <= fecha_hasta)
+    return q.all()
+
+
+def _ventas_merged_para_resumen(
+    db: Session,
+    user: models.Usuario,
+    fecha_desde: str,
+    fecha_hasta: str,
+    sucursal_id: Optional[str],
+) -> List[Any]:
+    """Histórico + turno en curso, sin duplicar ORDEN ya cerrado en histórico."""
+    hist = _ventas_en_rango(db, user, fecha_desde, fecha_hasta, sucursal_id)
+    ordenes_hist: set[str] = set()
+    for v in hist:
+        o = (v.orden or "").strip()
+        if o:
+            ordenes_hist.add(o)
+    turno = _ventas_turno_en_rango(db, user, fecha_desde, fecha_hasta, sucursal_id)
+    turno_filtrado = [t for t in turno if (t.orden or "").strip() not in ordenes_hist]
+    return list(hist) + list(turno_filtrado)
+
+
+def _montos_efectivo_tarjeta_row(v: Any) -> tuple[float, float]:
+    pagos = getattr(v, "pagos", None) or []
+    if pagos and isinstance(pagos, list):
+        ef = 0.0
+        tar = 0.0
+        for p in pagos:
+            if not isinstance(p, dict):
+                continue
+            amt = float(p.get("amount") or 0)
+            if amt <= 0:
+                continue
+            kind = (p.get("kind") or "").strip().lower()
+            if kind == "efectivo":
+                ef += amt
+            elif kind == "tarjeta":
+                tar += amt
+            elif kind == "otro":
+                continue
+            elif (p.get("name") or "").strip().lower() == "efectivo":
+                ef += amt
+            else:
+                continue
+        if ef > 0 or tar > 0 or pagos:
+            return ef, tar
+    return float(v.monto_efectivo or 0), float(v.monto_tarjeta or 0)
+
+
+def _acumular_pagos_en_map(v: Any, metodo_map: dict[str, float]) -> None:
+    pagos = getattr(v, "pagos", None) or []
+    if pagos and isinstance(pagos, list):
+        for p in pagos:
+            if not isinstance(p, dict):
+                continue
+            amt = float(p.get("amount") or 0)
+            if amt <= 0:
+                continue
+            name = (str(p.get("name") or "Otro")).strip() or "Otro"
+            metodo_map[name] += amt
+        return
+    label = (getattr(v, "metodo_pago_tarjeta", None) or "N/A").strip() or "N/A"
+    metodo_map[label] += float(v.monto_tarjeta or 0)
+    metodo_map["Efectivo"] += float(v.monto_efectivo or 0)
+
+
+def _resumen_from_ventas(ventas: List[Any]) -> dict[str, Any]:
     empty = {
         "total_ingresos": 0.0,
         "num_tickets": 0,
@@ -840,14 +1120,16 @@ def _resumen_from_ventas(ventas: List[models.Venta]) -> dict[str, Any]:
         "por_metodo": [],
         "por_dia": [],
         "top_productos": [],
+        "por_mesero": [],
+        "por_clase": [],
     }
     if not ventas:
         return empty
 
-    total_ingresos = sum(v.total_pagado or 0 for v in ventas)
+    total_ingresos = sum(float(v.total_pagado or 0) for v in ventas)
     num = len(ventas)
-    total_efectivo = sum(v.monto_efectivo or 0 for v in ventas)
-    total_tarjeta = sum(v.monto_tarjeta or 0 for v in ventas)
+    total_efectivo = sum(_montos_efectivo_tarjeta_row(v)[0] for v in ventas)
+    total_tarjeta = sum(_montos_efectivo_tarjeta_row(v)[1] for v in ventas)
 
     por_hora: dict[str, float] = defaultdict(float)
     for v in ventas:
@@ -856,9 +1138,7 @@ def _resumen_from_ventas(ventas: List[models.Venta]) -> dict[str, Any]:
 
     metodo_map: dict[str, float] = defaultdict(float)
     for v in ventas:
-        label = (v.metodo_pago_tarjeta or "N/A").strip() or "N/A"
-        metodo_map[label] += float(v.monto_tarjeta or 0)
-    metodo_map["Efectivo"] = total_efectivo
+        _acumular_pagos_en_map(v, metodo_map)
 
     hora_sorted = sorted(por_hora.keys())
     por_hora_list = [{"name": f"{h}", "ventas": round(por_hora[h], 2)} for h in hora_sorted]
@@ -867,6 +1147,7 @@ def _resumen_from_ventas(ventas: List[models.Venta]) -> dict[str, Any]:
     por_dia_acc: dict[str, dict[str, Any]] = {}
     for v in ventas:
         f = (v.fecha or "").strip() or ""
+        ef, tar = _montos_efectivo_tarjeta_row(v)
         if f not in por_dia_acc:
             por_dia_acc[f] = {
                 "fecha": f,
@@ -877,8 +1158,8 @@ def _resumen_from_ventas(ventas: List[models.Venta]) -> dict[str, Any]:
             }
         por_dia_acc[f]["total_pagado"] += float(v.total_pagado or 0)
         por_dia_acc[f]["num_tickets"] += 1
-        por_dia_acc[f]["total_efectivo"] += float(v.monto_efectivo or 0)
-        por_dia_acc[f]["total_tarjeta"] += float(v.monto_tarjeta or 0)
+        por_dia_acc[f]["total_efectivo"] += ef
+        por_dia_acc[f]["total_tarjeta"] += tar
     por_dia_sorted = sorted(por_dia_acc.keys())
     por_dia_list = [
         {
@@ -892,6 +1173,9 @@ def _resumen_from_ventas(ventas: List[models.Venta]) -> dict[str, Any]:
     ]
 
     prod_acc: dict[str, dict[str, Any]] = {}
+    clase_acc: dict[int, dict[str, Any]] = {}
+    clase_nombres = {1: "Artículos (CLASE 1)", 2: "Alimentos (CLASE 2)"}
+
     for v in ventas:
         for item in v.detalles or []:
             if not isinstance(item, dict):
@@ -907,6 +1191,17 @@ def _resumen_from_ventas(ventas: List[models.Venta]) -> dict[str, Any]:
             prod_acc[key]["total_renglon"] += tr
             prod_acc[key]["cantidad"] += cant
 
+            clase_raw = item.get("clase")
+            try:
+                clase_i = int(clase_raw) if clase_raw is not None and str(clase_raw).strip() != "" else 0
+            except (TypeError, ValueError):
+                clase_i = 0
+            if clase_i in (1, 2):
+                if clase_i not in clase_acc:
+                    clase_acc[clase_i] = {"name": clase_nombres[clase_i], "total_renglon": 0.0, "cantidad": 0.0}
+                clase_acc[clase_i]["total_renglon"] += tr
+                clase_acc[clase_i]["cantidad"] += cant
+
     top_sorted = sorted(prod_acc.values(), key=lambda x: -x["total_renglon"])[:20]
     top_productos = [
         {
@@ -918,6 +1213,40 @@ def _resumen_from_ventas(ventas: List[models.Venta]) -> dict[str, Any]:
         for p in top_sorted
     ]
 
+    mesero_acc: dict[str, dict[str, Any]] = {}
+    for v in ventas:
+        cod = (getattr(v, "mesero_codigo", None) or "").strip()
+        if not cod:
+            continue
+        nom = (getattr(v, "mesero_nombre", None) or "").strip() or cod
+        if cod not in mesero_acc:
+            mesero_acc[cod] = {"codigo": cod, "nombre": nom, "total_pagado": 0.0, "num_tickets": 0}
+        mesero_acc[cod]["total_pagado"] += float(v.total_pagado or 0)
+        mesero_acc[cod]["num_tickets"] += 1
+
+    por_mesero = sorted(mesero_acc.values(), key=lambda x: -x["total_pagado"])[:30]
+    por_mesero = [
+        {
+            "codigo": m["codigo"],
+            "nombre": m["nombre"],
+            "total_pagado": round(m["total_pagado"], 2),
+            "num_tickets": m["num_tickets"],
+        }
+        for m in por_mesero
+    ]
+
+    por_clase = sorted(
+        [
+            {
+                "name": clase_acc[k]["name"],
+                "total_renglon": round(clase_acc[k]["total_renglon"], 2),
+                "cantidad": round(clase_acc[k]["cantidad"], 3),
+            }
+            for k in sorted(clase_acc.keys())
+        ],
+        key=lambda x: -x["total_renglon"],
+    )
+
     return {
         "total_ingresos": round(total_ingresos, 2),
         "num_tickets": num,
@@ -928,6 +1257,8 @@ def _resumen_from_ventas(ventas: List[models.Venta]) -> dict[str, Any]:
         "por_metodo": por_metodo[:12],
         "por_dia": por_dia_list,
         "top_productos": top_productos,
+        "por_mesero": por_mesero,
+        "por_clase": por_clase,
     }
 
 
@@ -944,12 +1275,12 @@ def dashboard_resumen(
     KPIs y series para el dashboard. Admin ve todas las sucursales; visor solo las asignadas en usuario_sucursales.
     Incluye por_dia, top_productos (desde detalles JSON) y deltas opcionales vs el periodo anterior de igual duración.
     """
-    ventas = _ventas_en_rango(db, user, fecha_desde, fecha_hasta, sucursal_id)
+    ventas = _ventas_merged_para_resumen(db, user, fecha_desde, fecha_hasta, sucursal_id)
     out = _resumen_from_ventas(ventas)
 
     if include_previous:
         pd, ph = _prev_period_dates(fecha_desde, fecha_hasta)
-        prev_ventas = _ventas_en_rango(db, user, pd, ph, sucursal_id)
+        prev_ventas = _ventas_merged_para_resumen(db, user, pd, ph, sucursal_id)
         prev = _resumen_from_ventas(prev_ventas)
         out["deltas"] = {
             "total_ingresos_pct": _pct_delta(out["total_ingresos"], prev["total_ingresos"]),
@@ -1007,28 +1338,43 @@ def resume_sync(sucursal_nombre: str, db: Session = Depends(get_db)):
 # ENDPOINT DE GESTIÓN MANTENIMIENTO (Tarea 2.3)
 # ================================
 @app.delete("/admin/limpieza/{sucursal_nombre}", tags=["Mantenimiento"])
-def limpieza_reset(sucursal_nombre: str, fecha_inicio: str = None, fecha_fin: str = None, db: Session = Depends(get_db)):
-    sucursal = db.query(models.Sucursal).filter(models.Sucursal.nombre == sucursal_nombre).first()
+def limpieza_reset(
+    sucursal_nombre: str,
+    fecha_inicio: str | None = None,
+    fecha_fin: str | None = None,
+    user: models.Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """API legada: con `fecha_inicio` y `fecha_fin` borra solo ese rango en histórico; sin ambos, borra todo + turno."""
+    _require_maintenance_access(user)
+    sucursal = db.query(models.Sucursal).filter(models.Sucursal.nombre == sucursal_nombre.strip()).first()
     if not sucursal:
         raise HTTPException(status_code=404, detail="Sucursal no registrada")
 
-    query = db.query(models.Venta).filter(models.Venta.sucursal_id == sucursal.id)
     if fecha_inicio and fecha_fin:
-        query = query.filter(models.Venta.fecha.between(fecha_inicio, fecha_fin))
+        borrados, turno_del = _purge_ventas_importadas(
+            db,
+            sucursal,
+            completo=False,
+            fecha_desde=fecha_inicio.strip(),
+            fecha_hasta=fecha_fin.strip(),
+            log_prefijo="[API /admin/limpieza]",
+        )
+    else:
+        borrados, turno_del = _purge_ventas_importadas(
+            db,
+            sucursal,
+            completo=True,
+            fecha_desde=None,
+            fecha_hasta=None,
+            log_prefijo="[API /admin/limpieza]",
+        )
 
-    borrados = query.delete()
-
-    sucursal.ultimo_checkpoint_historico = None
-
-    log = models.LogSync(
-        sucursal_id=sucursal.id,
-        tipo="Limpieza",
-        mensaje=f"Borrado manual de {borrados} ventas. Checkpoint reseteado. Rango: {fecha_inicio}-{fecha_fin}",
-    )
-    db.add(log)
-    db.commit()
-
-    return {"status": "Limpiado", "registros_retirados": borrados}
+    return {
+        "status": "Limpiado",
+        "registros_retirados": borrados,
+        "ventas_turno_eliminadas": turno_del,
+    }
 
 
 # ================================
@@ -1065,6 +1411,23 @@ def exportar_top_10_csv(
 # ================================
 # ENDPOINT INGESTA SYNC AGENT (Tarea 2.4/2.1)
 # ================================
+def _sync_payload_to_venta_kwargs(v: dict) -> dict[str, Any]:
+    return {
+        "factura": v.get("factura"),
+        "fecha": v.get("fecha"),
+        "hora": v.get("hora"),
+        "total_pagado": v.get("total_pagado", 0),
+        "subtotal": v.get("subtotal", 0),
+        "metodo_pago_tarjeta": v.get("metodo_pago_tarjeta", "N/A"),
+        "monto_tarjeta": v.get("monto_tarjeta", 0),
+        "monto_efectivo": v.get("monto_efectivo", 0),
+        "pagos": v.get("pagos"),
+        "mesero_codigo": v.get("mesero_codigo"),
+        "mesero_nombre": v.get("mesero_nombre"),
+        "detalles": v.get("detalles", []),
+    }
+
+
 @app.post("/sync/upload/{sucursal_nombre}", tags=["Sincronización"])
 def upload_sync_data(
     sucursal_nombre: str,
@@ -1075,6 +1438,7 @@ def upload_sync_data(
     """
     Recepción del agente en cada PC.
     Autenticación por sucursal: `X-Sucursal-Password`.
+    Body: `historial` (incremental FACTURA1/2), opcional `turno_actual` (snapshot FACTURA1T/2T por ciclo).
     """
     sucursal_nombre_u = sucursal_nombre.strip().upper()
     sucursal = db.query(models.Sucursal).filter(models.Sucursal.nombre == sucursal_nombre_u).first()
@@ -1108,9 +1472,11 @@ def upload_sync_data(
     if sucursal.sync_paused:
         raise HTTPException(status_code=503, detail="Sync pausado para esta sucursal.")
 
-    historial = payload.get("historial", [])
+    historial = payload.get("historial") or []
     nuevas_inserciones = 0
     errores_detectados = 0
+    turno_filas = 0
+    mesero_historial_backfill = 0
 
     try:
         for v in historial:
@@ -1131,22 +1497,60 @@ def upload_sync_data(
 
             existe = db.query(models.Venta).filter(models.Venta.id == uuid_compuesto).first()
             if not existe:
+                kw = _sync_payload_to_venta_kwargs(v)
                 db_venta = models.Venta(
                     id=uuid_compuesto,
                     sucursal_id=sucursal.id,
                     orden=orden,
-                    factura=v.get("factura"),
-                    fecha=v.get("fecha"),
-                    hora=v.get("hora"),
-                    total_pagado=v.get("total_pagado", 0),
-                    subtotal=v.get("subtotal", 0),
-                    metodo_pago_tarjeta=v.get("metodo_pago_tarjeta", "N/A"),
-                    monto_tarjeta=v.get("monto_tarjeta", 0),
-                    monto_efectivo=v.get("monto_efectivo", 0),
-                    detalles=v.get("detalles", []),
+                    **kw,
                 )
                 db.add(db_venta)
                 nuevas_inserciones += 1
+                db.query(models.VentaTurno).filter(
+                    models.VentaTurno.sucursal_id == sucursal.id,
+                    models.VentaTurno.orden == orden,
+                ).delete(synchronize_session=False)
+            else:
+                # Las ventas ya insertadas no se volvían a tocar: backfill de mesero si venía NULL.
+                kw = _sync_payload_to_venta_kwargs(v)
+                cod_p = str(kw.get("mesero_codigo") or "").strip()
+                nom_p = str(kw.get("mesero_nombre") or "").strip()
+                if cod_p or nom_p:
+                    ex_cod = str(existe.mesero_codigo or "").strip()
+                    ex_nom = str(existe.mesero_nombre or "").strip()
+                    if not ex_cod and not ex_nom:
+                        existe.mesero_codigo = kw.get("mesero_codigo")
+                        existe.mesero_nombre = kw.get("mesero_nombre")
+                        mesero_historial_backfill += 1
+
+        if "turno_actual" in payload:
+            db.query(models.VentaTurno).filter(models.VentaTurno.sucursal_id == sucursal.id).delete(
+                synchronize_session=False
+            )
+            for v in payload.get("turno_actual") or []:
+                orden_t = str(v.get("orden", "")).strip()
+                if not orden_t:
+                    db.add(
+                        models.LogSync(
+                            sucursal_id=sucursal.id,
+                            tipo="Error Crítico ORDEN",
+                            mensaje="turno_actual: registro sin ORDEN.",
+                            payload_invalido=v,
+                        )
+                    )
+                    errores_detectados += 1
+                    continue
+                tid = f"{sucursal.id}_{orden_t}"
+                kw_t = _sync_payload_to_venta_kwargs(v)
+                db.add(
+                    models.VentaTurno(
+                        id=tid,
+                        sucursal_id=sucursal.id,
+                        orden=orden_t,
+                        **kw_t,
+                    )
+                )
+                turno_filas += 1
 
         db.commit()
     except Exception as exc:
@@ -1160,10 +1564,19 @@ def upload_sync_data(
             )
         )
         db.commit()
-        raise
+        logger.exception("upload_sync_data falló (sucursal=%s)", sucursal_nombre_u)
+        detail = str(exc)
+        if len(detail) > 1200:
+            detail = detail[:1200] + "…"
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al persistir sync: {detail}",
+        ) from exc
     return {
         "status": "ok",
         "nuevas_ventas_historial_insertadas": nuevas_inserciones,
         "logs_huerfanos": errores_detectados,
+        "turno_actual_filas": turno_filas,
+        "mesero_historial_backfill": mesero_historial_backfill,
         "sucursal": sucursal_nombre,
     }

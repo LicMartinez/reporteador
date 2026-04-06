@@ -6,6 +6,7 @@ import {
   KeyRound,
   LogOut,
   ShieldCheck,
+  Trash2,
   Users,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
@@ -15,11 +16,13 @@ import {
   createSwissPortalAdmin,
   createSwissSucursal,
   deleteSwissPortalAdmin,
+  deleteSwissSucursalVentasImportadas,
   fetchSwissCatalogos,
   fetchSwissDashboardUsers,
   fetchSwissPortalAdmins,
   fetchSwissSucursales,
   fetchSwissSucursalLogs,
+  patchSwissDashboardUser,
   patchSwissDashboardUserAccess,
   updateSwissCatalogo,
   patchSwissPortalAdmin,
@@ -29,6 +32,7 @@ import {
   type SwissAdminUserBrief,
   type SwissSucursalBrief,
   type SwissSucursalLogsItem,
+  type VentasImportadasPurgeResult,
 } from '../api/client';
 
 type TabKey = 'usuarios' | 'sucursales' | 'catalogos' | 'config';
@@ -44,6 +48,165 @@ function isoToDatetimeLocal(iso?: string | null) {
 function datetimeLocalToIso(v: string) {
   if (!v) return null;
   return new Date(v).toISOString();
+}
+
+type PurgeModalState =
+  | null
+  | { kind: 'completo'; sucursal: SwissSucursalBrief }
+  | { kind: 'rango'; sucursal: SwissSucursalBrief };
+
+function SwissDashboardUserCard({
+  u,
+  sucursales,
+  catalogos,
+  busy,
+  onAccessSave,
+  onProfileSave,
+}: {
+  u: SwissAdminUserBrief;
+  sucursales: SwissSucursalBrief[];
+  catalogos: SwissCatalogoBrief[];
+  busy: boolean;
+  onAccessSave: (userId: string, accessUntilLocal: string) => Promise<void>;
+  onProfileSave: (
+    userId: string,
+    payload: {
+      password?: string;
+      nombre: string | null;
+      sucursal_ids: string[];
+      catalogo_maestro_id: string | null;
+    }
+  ) => Promise<void>;
+}) {
+  const [pw, setPw] = useState('');
+  const [nombre, setNombre] = useState(u.nombre ?? '');
+  const [sIds, setSIds] = useState<string[]>(() => u.sucursales.map((s) => s.id));
+  const [catId, setCatId] = useState(u.catalogo_maestro_id ?? '');
+
+  const sucKey = u.sucursales.map((s) => s.id).join(',');
+
+  useEffect(() => {
+    setPw('');
+    setNombre(u.nombre ?? '');
+    setSIds(u.sucursales.map((s) => s.id));
+    setCatId(u.catalogo_maestro_id ?? '');
+  }, [u.id, u.nombre, u.catalogo_maestro_id, u.email, sucKey]);
+
+  return (
+    <div className="border border-slate-200 rounded-xl p-4 space-y-4">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="font-semibold text-slate-800">{u.email}</p>
+          {u.nombre ? <p className="text-xs text-slate-600">{u.nombre}</p> : null}
+          <p className="text-xs text-slate-500 mt-1">
+            Acceso hasta: {u.dashboard_access_until ? new Date(u.dashboard_access_until).toLocaleString() : '—'}
+          </p>
+        </div>
+        <div className="text-xs text-slate-500 shrink-0">Sucursales: {u.sucursales.length}</div>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-end border-t border-slate-100 pt-3">
+        <div>
+          <label className="block text-xs font-medium text-slate-600 mb-1">Modificar acceso</label>
+          <input
+            id={`accessInput-${u.id}`}
+            type="datetime-local"
+            defaultValue={isoToDatetimeLocal(u.dashboard_access_until)}
+            key={`acc-${u.id}-${u.dashboard_access_until ?? 'none'}`}
+            className="w-full rounded-xl border border-slate-200 px-3 py-2 text-slate-900 outline-none focus:ring-2 focus:ring-blue-500"
+          />
+        </div>
+        <div>
+          <button
+            type="button"
+            className="w-full py-2 rounded-xl bg-slate-800 text-white text-sm font-semibold hover:bg-slate-900 disabled:opacity-60"
+            disabled={busy}
+            onClick={async () => {
+              const input = document.getElementById(`accessInput-${u.id}`) as HTMLInputElement | null;
+              await onAccessSave(u.id, input?.value || '');
+            }}
+          >
+            Guardar acceso
+          </button>
+        </div>
+      </div>
+
+      <div className="border-t border-slate-100 pt-3 space-y-3">
+        <p className="text-xs font-semibold text-slate-700">Editar perfil</p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs font-medium text-slate-600 mb-1">Nombre (opcional)</label>
+            <input
+              value={nombre}
+              onChange={(e) => setNombre(e.target.value)}
+              className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-slate-600 mb-1">Nueva contraseña (opcional)</label>
+            <input
+              value={pw}
+              onChange={(e) => setPw(e.target.value)}
+              type="password"
+              autoComplete="new-password"
+              className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="Dejar vacío para no cambiar"
+            />
+          </div>
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-slate-600 mb-1">Catálogo maestro</label>
+          <select
+            className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-blue-500"
+            value={catId}
+            onChange={(e) => setCatId(e.target.value)}
+          >
+            <option value="">Sin catálogo maestro</option>
+            {catalogos.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.nombre}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-slate-600 mb-1">Sucursales asignadas</label>
+          <div className="max-h-36 overflow-y-auto rounded-xl border border-slate-200 p-2 bg-white">
+            {sucursales.map((s) => (
+              <label key={s.id} className="flex items-center gap-2 py-1 text-sm text-slate-700">
+                <input
+                  type="checkbox"
+                  checked={sIds.includes(s.id)}
+                  onChange={(e) => {
+                    if (e.target.checked) setSIds((prev) => [...prev, s.id]);
+                    else setSIds((prev) => prev.filter((x) => x !== s.id));
+                  }}
+                />
+                <span>{s.nombre.replace(/_/g, ' ')}</span>
+              </label>
+            ))}
+            {!sucursales.length && <p className="text-sm text-slate-500">No hay sucursales.</p>}
+          </div>
+        </div>
+        <button
+          type="button"
+          className="w-full sm:w-auto px-4 py-2 rounded-xl bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700 disabled:opacity-60"
+          disabled={busy || sIds.length === 0}
+          onClick={async () => {
+            if (sIds.length === 0) return;
+            await onProfileSave(u.id, {
+              password: pw.trim() || undefined,
+              nombre: nombre.trim() || null,
+              sucursal_ids: sIds,
+              catalogo_maestro_id: catId || null,
+            });
+          }}
+        >
+          Guardar perfil
+        </button>
+      </div>
+    </div>
+  );
 }
 
 export default function SwissAdminPortal() {
@@ -62,6 +225,13 @@ export default function SwissAdminPortal() {
   // Logs (sucursales)
   const [selectedSucursalId, setSelectedSucursalId] = useState<string>('');
   const [logs, setLogs] = useState<SwissSucursalLogsItem[]>([]);
+
+  // Purga por sucursal (modal)
+  const [purgeModal, setPurgeModal] = useState<PurgeModalState>(null);
+  const [purgeModalConfirmNombre, setPurgeModalConfirmNombre] = useState('');
+  const [purgeModalFechaDesde, setPurgeModalFechaDesde] = useState('');
+  const [purgeModalFechaHasta, setPurgeModalFechaHasta] = useState('');
+  const [purgeFeedback, setPurgeFeedback] = useState<VentasImportadasPurgeResult | null>(null);
 
   // Create sucursal
   const [newSucursalNombre, setNewSucursalNombre] = useState('');
@@ -145,6 +315,57 @@ export default function SwissAdminPortal() {
     }
   }
 
+  function openPurgeModal(s: SwissSucursalBrief, kind: 'completo' | 'rango') {
+    setErr(null);
+    setPurgeFeedback(null);
+    setPurgeModalConfirmNombre('');
+    setPurgeModalFechaDesde('');
+    setPurgeModalFechaHasta('');
+    setPurgeModal({ kind, sucursal: s });
+  }
+
+  function closePurgeModal() {
+    setPurgeModal(null);
+    setPurgeModalConfirmNombre('');
+    setPurgeModalFechaDesde('');
+    setPurgeModalFechaHasta('');
+  }
+
+  async function confirmPurgeModal() {
+    if (!purgeModal) return;
+    const s = purgeModal.sucursal;
+    setErr(null);
+    if (purgeModal.kind === 'completo') {
+      if (purgeModalConfirmNombre.trim().toUpperCase() !== s.nombre.trim().toUpperCase()) {
+        setErr('Escribe el nombre exacto de la sucursal para confirmar el borrado total.');
+        return;
+      }
+    } else {
+      if (!purgeModalFechaDesde.trim() && !purgeModalFechaHasta.trim()) {
+        setErr('Indica al menos una fecha (desde o hasta).');
+        return;
+      }
+    }
+    setBusy(true);
+    try {
+      const res = await deleteSwissSucursalVentasImportadas(s.id, {
+        modo: purgeModal.kind === 'completo' ? 'completo' : 'rango',
+        fecha_desde: purgeModalFechaDesde.trim() || undefined,
+        fecha_hasta: purgeModalFechaHasta.trim() || undefined,
+      });
+      setPurgeFeedback(res);
+      closePurgeModal();
+      if (selectedSucursalId === s.id) {
+        const fresh = await fetchSwissSucursalLogs(s.id, 50);
+        setLogs(fresh);
+      }
+    } catch {
+      setErr('No se pudo ejecutar el borrado. Revisa permisos y conexión con la API.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function onCreateDashboardUser(e: React.FormEvent) {
     e.preventDefault();
     setErr(null);
@@ -181,6 +402,27 @@ export default function SwissAdminPortal() {
       await loadAll();
     } catch {
       setErr('No se pudo actualizar la fecha de acceso.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onSaveUserProfile(
+    userId: string,
+    payload: {
+      password?: string;
+      nombre: string | null;
+      sucursal_ids: string[];
+      catalogo_maestro_id: string | null;
+    }
+  ) {
+    setBusy(true);
+    setErr(null);
+    try {
+      await patchSwissDashboardUser(userId, payload);
+      await loadAll();
+    } catch {
+      setErr('No se pudo guardar el perfil del usuario.');
     } finally {
       setBusy(false);
     }
@@ -421,26 +663,54 @@ export default function SwissAdminPortal() {
                 <h3 className="text-lg font-bold text-slate-800 mb-4">Listado</h3>
                 <div className="space-y-3">
                   {sucursales.map((s) => (
-                    <div key={s.id} className="border border-slate-200 rounded-xl p-3 flex items-center justify-between gap-3">
-                      <div>
-                        <p className="font-semibold text-slate-800">{s.nombre.replace(/_/g, ' ')}</p>
-                        <p className="text-xs text-slate-500">
-                          Última conexión: {s.last_connection_at ? new Date(s.last_connection_at).toLocaleString() : '—'}
-                        </p>
-                      </div>
-                      <div>
+                    <div key={s.id} className="border border-slate-200 rounded-xl p-3">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                          <p className="font-semibold text-slate-800">{s.nombre.replace(/_/g, ' ')}</p>
+                          <p className="text-xs text-slate-500">
+                            Última conexión: {s.last_connection_at ? new Date(s.last_connection_at).toLocaleString() : '—'}
+                          </p>
+                        </div>
                         <button
                           type="button"
                           onClick={() => setSelectedSucursalId(s.id)}
-                          className="px-3 py-2 rounded-xl bg-slate-800 text-white text-sm font-semibold hover:bg-slate-900"
+                          className="shrink-0 px-3 py-2 rounded-xl bg-slate-800 text-white text-sm font-semibold hover:bg-slate-900"
                         >
                           Ver logs
+                        </button>
+                      </div>
+                      <div className="mt-3 pt-3 border-t border-slate-100 flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={() => openPurgeModal(s, 'completo')}
+                          className="px-3 py-2 rounded-xl text-sm font-semibold border border-amber-700 text-amber-900 bg-white hover:bg-amber-50 transition"
+                        >
+                          Borra histórico total
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => openPurgeModal(s, 'rango')}
+                          className="px-3 py-2 rounded-xl text-sm font-semibold border border-violet-600 text-violet-900 bg-white hover:bg-violet-50 transition"
+                        >
+                          Borra por fechas
                         </button>
                       </div>
                     </div>
                   ))}
                   {!sucursales.length && <p className="text-sm text-slate-500">No hay sucursales.</p>}
                 </div>
+                {purgeFeedback && (
+                  <p className="mt-4 text-sm text-slate-800 bg-emerald-50 rounded-xl border border-emerald-200 p-3">
+                    Borrado aplicado: <strong>{purgeFeedback.registros_retirados}</strong> registro(s) de histórico
+                    {purgeFeedback.ventas_turno_eliminadas > 0 && (
+                      <>
+                        {' '}
+                        y <strong>{purgeFeedback.ventas_turno_eliminadas}</strong> de turno actual
+                      </>
+                    )}
+                    . <span className="font-mono">{purgeFeedback.sucursal_nombre}</span> ({purgeFeedback.modo}).
+                  </p>
+                )}
 
                 {selectedSucursalId && (
                   <div className="mt-6">
@@ -564,46 +834,17 @@ export default function SwissAdminPortal() {
 
               <section className="card-premium p-6">
                 <h3 className="text-lg font-bold text-slate-800 mb-4">Consultar usuarios</h3>
-                <div className="space-y-3">
+                <div className="space-y-4 max-h-[calc(100vh-12rem)] overflow-y-auto pr-1">
                   {dashboardUsers.map((u) => (
-                    <div key={u.id} className="border border-slate-200 rounded-xl p-3">
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <p className="font-semibold text-slate-800">{u.email}</p>
-                          <p className="text-xs text-slate-500">
-                            Acceso hasta: {u.dashboard_access_until ? new Date(u.dashboard_access_until).toLocaleString() : '—'}
-                          </p>
-                        </div>
-                        <div className="text-xs text-slate-500">Sucursales: {u.sucursales.length}</div>
-                      </div>
-
-                      <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3 items-end">
-                        <div>
-                          <label className="block text-xs font-medium text-slate-600 mb-1">Modificar acceso</label>
-                          <input
-                            id={`accessInput-${u.id}`}
-                            type="datetime-local"
-                            defaultValue={isoToDatetimeLocal(u.dashboard_access_until)}
-                            className="w-full rounded-xl border border-slate-200 px-3 py-2 text-slate-900 outline-none focus:ring-2 focus:ring-blue-500"
-                          />
-                        </div>
-                        <div>
-                          <button
-                            type="button"
-                            className="w-full py-2 rounded-xl bg-slate-800 text-white text-sm font-semibold hover:bg-slate-900"
-                            onClick={async () => {
-                              // Re-read from input in this row using querySelector.
-                              const input = document.getElementById(`accessInput-${u.id}`) as HTMLInputElement | null;
-                              const val = input?.value || '';
-                              await onUpdateUserAccess(u.id, val);
-                            }}
-                          >
-                            Guardar
-                          </button>
-                        </div>
-                      </div>
-
-                    </div>
+                    <SwissDashboardUserCard
+                      key={u.id}
+                      u={u}
+                      sucursales={sucursales}
+                      catalogos={catalogos}
+                      busy={busy}
+                      onAccessSave={onUpdateUserAccess}
+                      onProfileSave={onSaveUserProfile}
+                    />
                   ))}
                   {!dashboardUsers.length && <p className="text-sm text-slate-500">No hay usuarios.</p>}
                 </div>
@@ -861,6 +1102,104 @@ export default function SwissAdminPortal() {
           </div>
         )}
       </main>
+
+      {purgeModal && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm"
+          role="presentation"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) closePurgeModal();
+          }}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-xl border border-slate-200 max-w-md w-full p-6 space-y-4"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="purge-modal-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start gap-3">
+              <Trash2 className="w-8 h-8 text-amber-600 shrink-0 mt-0.5" />
+              <div>
+                <h3 id="purge-modal-title" className="text-lg font-bold text-slate-900">
+                  Advertencia
+                </h3>
+                <p className="text-sm text-slate-700 mt-2 leading-relaxed">
+                  Precaución, ¿está seguro de querer realizar el{' '}
+                  {purgeModal.kind === 'completo' ? (
+                    <strong>Borrado total</strong>
+                  ) : (
+                    <strong>borrado del rango de fechas indicado</strong>
+                  )}
+                  {purgeModal.kind === 'completo'
+                    ? '? Se eliminarán todas las ventas importadas y el turno actual. El checkpoint del agente se reseteará.'
+                    : '? Solo se borrará el histórico en ese intervalo; el turno actual no se elimina.'}
+                </p>
+                <p className="text-xs text-slate-500 mt-2">
+                  Sucursal: <span className="font-mono font-semibold text-slate-700">{purgeModal.sucursal.nombre}</span>
+                </p>
+              </div>
+            </div>
+
+            {purgeModal.kind === 'rango' && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">Fecha desde</label>
+                  <input
+                    type="date"
+                    value={purgeModalFechaDesde}
+                    onChange={(e) => setPurgeModalFechaDesde(e.target.value)}
+                    className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-violet-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">Fecha hasta</label>
+                  <input
+                    type="date"
+                    value={purgeModalFechaHasta}
+                    onChange={(e) => setPurgeModalFechaHasta(e.target.value)}
+                    className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-violet-500"
+                  />
+                </div>
+                <p className="sm:col-span-2 text-xs text-slate-500">Indica al menos una fecha.</p>
+              </div>
+            )}
+
+            {purgeModal.kind === 'completo' && (
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">
+                  Escribe el nombre exacto de la sucursal para confirmar
+                </label>
+                <input
+                  value={purgeModalConfirmNombre}
+                  onChange={(e) => setPurgeModalConfirmNombre(e.target.value)}
+                  className="w-full rounded-xl border border-slate-200 px-3 py-2.5 font-mono text-sm text-slate-900 outline-none focus:ring-2 focus:ring-amber-500"
+                  placeholder={purgeModal.sucursal.nombre}
+                  autoComplete="off"
+                />
+              </div>
+            )}
+
+            <div className="flex flex-wrap justify-end gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={closePurgeModal}
+                className="px-4 py-2 rounded-xl border border-slate-200 text-slate-800 font-semibold text-sm hover:bg-slate-50"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={() => void confirmPurgeModal()}
+                disabled={busy}
+                className="px-4 py-2 rounded-xl bg-amber-700 text-white font-semibold text-sm hover:bg-amber-800 disabled:opacity-60"
+              >
+                Confirmar borrado
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

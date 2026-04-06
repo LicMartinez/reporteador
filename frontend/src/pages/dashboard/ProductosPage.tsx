@@ -4,6 +4,7 @@ import { SectionCard } from '../../components/dashboard/SectionCard';
 export default function ProductosPage() {
   const { data, loading } = useDashboardShell();
   const rows = data?.top_productos ?? [];
+  const porClase = data?.por_clase ?? [];
 
   return (
     <div className="space-y-8">
@@ -48,10 +49,36 @@ export default function ProductosPage() {
         </div>
       </SectionCard>
 
-      <SectionCard title="Categorías">
-        <p className="text-slate-600 text-sm">
-          Las categorías requieren un catálogo enlazado en el POS o campos adicionales en la sincronización. Próximamente.
+      <SectionCard title="Por tipo de ítem (CLASE en FACTURA2)">
+        <p className="text-sm text-slate-500 mb-4">
+          Agregado por <span className="font-mono">CLASE</span> en cada renglón: 1 artículos (GENERAL), 2 alimentos.
         </p>
+        {porClase.length === 0 ? (
+          <p className="text-slate-600 text-sm">Sin renglones con CLASE 1 o 2 en este periodo.</p>
+        ) : (
+          <div className="overflow-x-auto rounded-lg border border-slate-200">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="bg-slate-50 text-left text-slate-600 border-b border-slate-200">
+                  <th className="px-4 py-3 font-semibold">Tipo</th>
+                  <th className="px-4 py-3 font-semibold text-right">Cantidad</th>
+                  <th className="px-4 py-3 font-semibold text-right">Total renglón</th>
+                </tr>
+              </thead>
+              <tbody>
+                {porClase.map((c) => (
+                  <tr key={c.name} className="border-b border-slate-100 hover:bg-slate-50/80">
+                    <td className="px-4 py-3 font-medium text-slate-900">{c.name}</td>
+                    <td className="px-4 py-3 text-right tabular-nums">{c.cantidad.toLocaleString('es-MX')}</td>
+                    <td className="px-4 py-3 text-right tabular-nums font-medium">
+                      ${c.total_renglon.toLocaleString('es-MX')}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </SectionCard>
     </div>
   );

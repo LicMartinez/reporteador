@@ -1,5 +1,20 @@
+from enum import Enum
+
 from pydantic import BaseModel, Field
 from typing import List, Optional
+
+
+class VentasImportadasPurgeModo(str, Enum):
+    completo = "completo"
+    rango = "rango"
+
+
+class VentasImportadasPurgeResult(BaseModel):
+    status: str
+    registros_retirados: int
+    ventas_turno_eliminadas: int = 0
+    modo: str
+    sucursal_nombre: str
 
 
 class LoginRequest(BaseModel):
@@ -124,6 +139,15 @@ class SwissAdminCreateDashboardUserRequest(BaseModel):
 
 class SwissAdminUpdateDashboardUserAccessRequest(BaseModel):
     dashboard_access_until: Optional[str] = None
+
+
+class SwissAdminUpdateDashboardUserRequest(BaseModel):
+    """PATCH parcial: solo los campos enviados se actualizan (usa exclude_unset en el endpoint)."""
+
+    password: Optional[str] = Field(default=None, min_length=6, max_length=256)
+    nombre: Optional[str] = Field(default=None, max_length=255)
+    sucursal_ids: Optional[List[str]] = None
+    catalogo_maestro_id: Optional[str] = None
 
 
 class SwissAdminUserBrief(BaseModel):

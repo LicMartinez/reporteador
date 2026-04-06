@@ -4,7 +4,7 @@ import time
 import datetime
 import logging
 import sys
-from typing import Any, Callable, List
+from typing import Any, Callable, Dict, List
 
 import httpx
 from dbfread import DBF
@@ -104,7 +104,7 @@ def safely_read_dbf(dbc_dir: str, file_name: str, retries: int = 5, delay: int =
 
 def get_tarjetas_map(dbc_dir: str) -> dict:
     tarjetas_records = safely_read_dbf(dbc_dir, "TARJETAS.DBF")
-    tarjeta_map = {}
+    tarjeta_map: dict[str, str] = {}
     for t in tarjetas_records:
         cod = str(t.get("COD_TAR", "")).strip()
         desc = str(t.get("DES_TAR", "")).strip()
@@ -113,18 +113,226 @@ def get_tarjetas_map(dbc_dir: str) -> dict:
     return tarjeta_map
 
 
-def process_historical(dbc_dir: str, tarjetas_map: dict, last_orden: str) -> List[dict]:
-    factura1 = safely_read_dbf(dbc_dir, "FACTURA1.DBF")
-    factura2 = safely_read_dbf(dbc_dir, "FACTURA2.DBF")
+_MESERO_COD_KEYS = ("COD_MES", "MESERO", "CLAVE", "CODIGO", "NUM_MES", "NUMERO")
+_MESERO_NOM_KEYS = ("DES_MES", "NOMBRE", "NOM_MES", "DESCRIP", "DESC", "DES_MESA")
 
+
+def _first_non_empty_str(row: dict, keys: tuple[str, ...]) -> str:
+    for k in keys:
+        v = row.get(k)
+        if v is None:
+            continue
+        s = str(v).strip()
+        if s:
+            return s
+    return ""
+
+
+def get_meseros_map(dbc_dir: str) -> dict:
+    rows = safely_read_dbf(dbc_dir, "MESEROS.DBF")
+    out: dict[str, str] = {}
+    for r in rows:
+        cod = _first_non_empty_str(r, _MESERO_COD_KEYS)
+        des = _first_non_empty_str(r, _MESERO_NOM_KEYS)
+        if cod:
+            out[cod] = des
+    return out
+
+
+def lookup_mesero_nombre(meseros_map: dict, cod: str) -> str | None:
+    """Resuelve nombre ante códigos con/sin ceros a la izquierda (p. ej. 22 vs 022)."""
+    if not cod:
+        return None
+    if cod in meseros_map:
+        n = meseros_map[cod]
+        return n if n else None
+    alt = cod.lstrip("0") or "0"
+    if alt != cod and alt in meseros_map:
+        n = meseros_map[alt]
+        return n if n else None
+    for width in range(2, 6):
+        z = cod.zfill(width)
+        if z in meseros_map:
+            n = meseros_map[z]
+            return n if n else None
+    return None
+
+
+def resolve_mesero_codigo(
+    f1item: dict,
+    details_map: Dict[str, List[dict]],
+    orden: str,
+) -> str:
+    """Encabezado FACTURA1/1T; si viene vacío, primer MESERO en líneas FACTURA2/2T."""
+    c = _first_non_empty_str(f1item, ("MESERO", "MAGOS"))
+    if c:
+        return c
+    for d in details_map.get(orden, []):
+        c = _first_non_empty_str(d, ("MESERO", "MAGOS"))
+        if c:
+            return c
+    return ""
+
+
+def _float(v: Any) -> float:
+    try:
+        return float(v or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def build_pagos(f1item: dict, tarjetas_map: dict) -> List[dict]:
+    """Pares nombre/monto/kind para el dashboard (multi-tarjeta y otros medios)."""
+    out: List[dict] = []
+    tar_slots = [
+        ("CODTAR", "TAR"),
+        ("CODTAR2", "TAR2"),
+        ("CODTAR3", "TAR3"),
+        ("CODTAR4", "TAR4"),
+        ("CODTAR5", "TAR5"),
+        ("CODTAR6", "TAR6"),
+        ("CODTAR7", "TAR7"),
+        ("CODTAR8", "TAR8"),
+        ("CODTAR9", "TAR9"),
+    ]
+    for cod_k, amt_k in tar_slots:
+        amt = _float(f1item.get(amt_k))
+        if amt <= 0:
+            continue
+        cod = str(f1item.get(cod_k, "")).strip()
+        name = tarjetas_map.get(cod, f"Tarjeta {cod or amt_k}") if cod else f"Tarjeta ({amt_k})"
+        out.append({"name": name, "amount": amt, "kind": "tarjeta"})
+
+    efe = _float(f1item.get("EFE"))
+    if efe > 0:
+        out.append({"name": "Efectivo", "amount": efe, "kind": "efectivo"})
+
+    chk = _float(f1item.get("CHK"))
+    if chk > 0:
+        out.append({"name": "Cheque", "amount": chk, "kind": "otro"})
+
+    vale = _float(f1item.get("VALE"))
+    if vale > 0:
+        d = str(f1item.get("DVALE", "")).strip()
+        out.append({"name": d or "Vale", "amount": vale, "kind": "otro"})
+
+    cup = _float(f1item.get("MON_CUP"))
+    if cup > 0:
+        out.append({"name": "Cupón / descuento", "amount": cup, "kind": "otro"})
+
+    cre = _float(f1item.get("CRE"))
+    if cre > 0:
+        d = str(f1item.get("DCRE", "")).strip()
+        out.append({"name": d or "Crédito / cuenta", "amount": cre, "kind": "otro"})
+
+    otr = _float(f1item.get("OTR"))
+    if otr > 0:
+        d = str(f1item.get("DOTR", "")).strip()
+        out.append({"name": d or "Otro medio", "amount": otr, "kind": "otro"})
+
+    dol = _float(f1item.get("DOL"))
+    if dol > 0:
+        out.append({"name": "Dólares (USD)", "amount": dol, "kind": "otro"})
+
+    for label, key in (("Colombianos (COL)", "COL"), ("Colombianos 2 (COL2)", "COL2")):
+        v = _float(f1item.get(key))
+        if v > 0:
+            out.append({"name": label, "amount": v, "kind": "otro"})
+
+    eur = _float(f1item.get("EUR"))
+    if eur > 0:
+        out.append({"name": "Euros", "amount": eur, "kind": "otro"})
+
+    vip = _float(f1item.get("VIP"))
+    if vip > 0:
+        out.append({"name": "VIP", "amount": vip, "kind": "otro"})
+
+    return out
+
+
+def _detalle_line(d: dict) -> dict:
+    line = {
+        "codigo": str(d.get("CODIGO", "")).strip(),
+        "cantidad": float(d.get("CANT", 0) or 0),
+        "precio": float(d.get("PRECIO", 0) or 0),
+        "total_renglon": float(d.get("TOTAL", 0) or 0),
+        "descripcion": str(d.get("DESCRIP", "")).strip(),
+    }
+    clase_raw = d.get("CLASE")
+    try:
+        c = int(clase_raw) if clase_raw is not None and str(clase_raw).strip() != "" else 0
+    except (TypeError, ValueError):
+        c = 0
+    if c in (1, 2):
+        line["clase"] = c
+    return line
+
+
+def build_venta_payload(
+    f1item: dict,
+    details_map: Dict[str, List[dict]],
+    tarjetas_map: dict,
+    meseros_map: dict,
+) -> dict | None:
+    orden = str(f1item.get("ORDEN", "")).strip()
+    if not orden:
+        return None
+    if f1item.get("QUE") == 1:
+        return None
+
+    pagos = build_pagos(f1item, tarjetas_map)
+    monto_tarjeta = sum(p["amount"] for p in pagos if p.get("kind") == "tarjeta")
+    monto_efectivo = sum(p["amount"] for p in pagos if p.get("kind") == "efectivo")
+
+    codtar = str(f1item.get("CODTAR", "")).strip()
+    tipo_tarjeta = tarjetas_map.get(codtar, "Otra/Desconocida") if codtar else "N/A"
+
+    mesero_cod = resolve_mesero_codigo(f1item, details_map, orden)
+    mesero_nombre = lookup_mesero_nombre(meseros_map, mesero_cod) if mesero_cod else None
+
+    detalles: List[dict] = []
+    if orden in details_map:
+        for d in details_map[orden]:
+            if d.get("GRATIS", 0) == 1:
+                continue
+            detalles.append(_detalle_line(d))
+
+    return {
+        "orden": orden,
+        "factura": str(f1item.get("FACTURA", "")).strip(),
+        "fecha": datetime_convert(f1item.get("FECHA")),
+        "hora": str(f1item.get("HORA1", "")).strip(),
+        "total_pagado": _float(f1item.get("TOT")),
+        "subtotal": _float(f1item.get("SUB2")),
+        "metodo_pago_tarjeta": tipo_tarjeta,
+        "monto_tarjeta": monto_tarjeta,
+        "monto_efectivo": monto_efectivo,
+        "pagos": pagos,
+        "mesero_codigo": mesero_cod or None,
+        "mesero_nombre": mesero_nombre,
+        "detalles": detalles,
+    }
+
+
+def _details_map_from_factura2(rows: List[dict]) -> dict[str, List[dict]]:
     details_map: dict[str, List[dict]] = {}
-    for f2item in factura2:
+    for f2item in rows:
         orden = str(f2item.get("ORDEN", "")).strip()
         if not orden:
             continue
-        if f2item.get("GRATIS", 0) == 1:
-            continue
         details_map.setdefault(orden, []).append(f2item)
+    return details_map
+
+
+def process_historical(
+    dbc_dir: str,
+    tarjetas_map: dict,
+    meseros_map: dict,
+    last_orden: str,
+) -> List[dict]:
+    factura1 = safely_read_dbf(dbc_dir, "FACTURA1.DBF")
+    factura2 = safely_read_dbf(dbc_dir, "FACTURA2.DBF")
+    details_map = _details_map_from_factura2(factura2)
 
     processed_sales: List[dict] = []
     last_key = orden_sort_key(last_orden) if last_orden else -1
@@ -137,45 +345,36 @@ def process_historical(dbc_dir: str, tarjetas_map: dict, last_orden: str) -> Lis
         if last_key >= 0 and orden_sort_key(orden) <= last_key:
             continue
 
-        if f1item.get("QUE") == 1:
-            continue
-
-        codtar = str(f1item.get("CODTAR", "")).strip()
-        tipo_tarjeta = tarjetas_map.get(codtar, "Otra/Desconocida") if codtar else "N/A"
-
-        venta_obj = {
-            "orden": orden,
-            "factura": str(f1item.get("FACTURA", "")).strip(),
-            "fecha": datetime_convert(f1item.get("FECHA")),
-            "hora": str(f1item.get("HORA1", "")).strip(),
-            "total_pagado": float(f1item.get("TOT", 0) or 0),
-            "subtotal": float(f1item.get("SUB2", 0) or 0),
-            "metodo_pago_tarjeta": tipo_tarjeta,
-            "monto_tarjeta": float(f1item.get("TAR", 0) or 0),
-            "monto_efectivo": float(f1item.get("EFE", 0) or 0),
-            "detalles": [],
-        }
-
-        if orden in details_map:
-            for d in details_map[orden]:
-                venta_obj["detalles"].append(
-                    {
-                        "codigo": str(d.get("CODIGO", "")).strip(),
-                        "cantidad": float(d.get("CANT", 0) or 0),
-                        "precio": float(d.get("PRECIO", 0) or 0),
-                        "total_renglon": float(d.get("TOTAL", 0) or 0),
-                        "descripcion": str(d.get("DESCRIP", "")).strip(),
-                    }
-                )
-
-        processed_sales.append(venta_obj)
+        venta_obj = build_venta_payload(f1item, details_map, tarjetas_map, meseros_map)
+        if venta_obj:
+            processed_sales.append(venta_obj)
 
     processed_sales.sort(key=lambda x: orden_sort_key(x["orden"]))
     return processed_sales
 
 
-def upload_historial(
-    rows: List[dict],
+def process_turno_actual(
+    dbc_dir: str,
+    tarjetas_map: dict,
+    meseros_map: dict,
+) -> List[dict]:
+    """Snapshot completo del turno (FACTURA1T / FACTURA2T)."""
+    factura1t = safely_read_dbf(dbc_dir, "FACTURA1T.DBF")
+    factura2t = safely_read_dbf(dbc_dir, "FACTURA2T.DBF")
+    details_map = _details_map_from_factura2(factura2t)
+
+    out: List[dict] = []
+    for f1item in factura1t:
+        venta_obj = build_venta_payload(f1item, details_map, tarjetas_map, meseros_map)
+        if venta_obj:
+            out.append(venta_obj)
+    out.sort(key=lambda x: orden_sort_key(x["orden"]))
+    return out
+
+
+def upload_sync(
+    historial: List[dict],
+    turno_actual: List[dict],
     settings: dict,
     on_chunk: Callable[[int, int], None] | None = None,
 ) -> dict:
@@ -194,18 +393,37 @@ def upload_historial(
 
     total_new = 0
     errores = 0
-    n_chunks = max(1, (len(rows) + batch_size - 1) // batch_size) if rows else 1
+    turno_filas = 0
+
     with httpx.Client(timeout=120.0) as client:
-        for chunk_num, i in enumerate(range(0, len(rows), batch_size), start=1):
-            chunk = rows[i : i + batch_size]
-            resp = client.post(url, json={"historial": chunk}, headers=headers)
+        if not historial:
+            body: dict = {"turno_actual": turno_actual}
+            resp = client.post(url, json=body, headers=headers)
             resp.raise_for_status()
-            body = resp.json()
-            total_new += int(body.get("nuevas_ventas_historial_insertadas", 0))
-            errores += int(body.get("logs_huerfanos", 0))
+            b = resp.json()
+            total_new += int(b.get("nuevas_ventas_historial_insertadas", 0))
+            errores += int(b.get("logs_huerfanos", 0))
+            turno_filas += int(b.get("turno_actual_filas", 0))
+            return {"nuevas": total_new, "errores": errores, "turno_filas": turno_filas}
+
+        n_chunks = max(1, (len(historial) + batch_size - 1) // batch_size)
+        for chunk_num, i in enumerate(range(0, len(historial), batch_size), start=1):
+            chunk = historial[i : i + batch_size]
+            is_last = i + batch_size >= len(historial)
+            body = {"historial": chunk}
+            if is_last:
+                body["turno_actual"] = turno_actual
+            resp = client.post(url, json=body, headers=headers)
+            resp.raise_for_status()
+            b = resp.json()
+            total_new += int(b.get("nuevas_ventas_historial_insertadas", 0))
+            errores += int(b.get("logs_huerfanos", 0))
+            if is_last:
+                turno_filas += int(b.get("turno_actual_filas", 0))
             if on_chunk:
                 on_chunk(chunk_num, n_chunks)
-    return {"nuevas": total_new, "errores": errores}
+
+    return {"nuevas": total_new, "errores": errores, "turno_filas": turno_filas}
 
 
 def _execute_single_sync(progress: Callable[[str, float], None] | None = None) -> dict:
@@ -224,19 +442,24 @@ def _execute_single_sync(progress: Callable[[str, float], None] | None = None) -
 
     last = load_checkpoint(ck)
     tarjetas_map = get_tarjetas_map(dbc)
+    meseros_map = get_meseros_map(dbc)
     if progress:
-        progress("Procesando ventas pendientes…", 18.0)
-    historical_sales = process_historical(dbc, tarjetas_map, last)
+        progress("Procesando turno actual (FACTURA1T)…", 12.0)
+    turno_rows = process_turno_actual(dbc, tarjetas_map, meseros_map)
+    if progress:
+        progress("Procesando ventas históricas pendientes…", 18.0)
+    historical_sales = process_historical(dbc, tarjetas_map, meseros_map, last)
 
-    if not historical_sales:
-        logging.info("Sin ventas nuevas respecto al checkpoint (o sin datos).")
+    if not historical_sales and not turno_rows:
+        logging.info("Sin datos de turno ni histórico nuevo.")
         if progress:
-            progress("Sin ventas nuevas (checkpoint al día, sin DBF o sin datos).", 100.0)
+            progress("Sin datos para sincronizar.", 100.0)
         return {
             "success": True,
             "tickets": 0,
             "nuevas": 0,
             "errores": 0,
+            "turno_filas": 0,
             "error": None,
         }
 
@@ -245,9 +468,13 @@ def _execute_single_sync(progress: Callable[[str, float], None] | None = None) -
             pct = 25.0 + 70.0 * (cur / max(total, 1))
             progress(f"Subiendo al servidor: lote {cur} de {total}…", min(pct, 99.0))
 
-    logging.info("Enviando %s tickets nuevos en lotes…", len(historical_sales))
+    logging.info(
+        "Enviando sync — histórico: %s ticket(s), turno_actual: %s",
+        len(historical_sales),
+        len(turno_rows),
+    )
     try:
-        summary = upload_historial(historical_sales, s, on_chunk=on_chunk)
+        summary = upload_sync(historical_sales, turno_rows, s, on_chunk=on_chunk if historical_sales else None)
     except Exception as e:
         logging.exception("Fallo en sync: %s", e)
         if progress:
@@ -257,20 +484,25 @@ def _execute_single_sync(progress: Callable[[str, float], None] | None = None) -
             "tickets": len(historical_sales),
             "nuevas": 0,
             "errores": 0,
+            "turno_filas": 0,
             "error": str(e),
         }
 
-    max_orden = max(historical_sales, key=lambda x: orden_sort_key(x["orden"]))["orden"]
-    save_checkpoint(ck, max_orden)
+    if historical_sales:
+        max_orden = max(historical_sales, key=lambda x: orden_sort_key(x["orden"]))["orden"]
+        save_checkpoint(ck, max_orden)
+
     logging.info(
-        "Sync OK — insertadas ~%s, logs huerfanos=%s, checkpoint ORDEN=%s",
+        "Sync OK — insertadas histórico ~%s, turno_filas=%s, huérfanos=%s, checkpoint=%s",
         summary["nuevas"],
+        summary.get("turno_filas", 0),
         summary["errores"],
-        max_orden,
+        load_checkpoint(ck) or "(sin cambio)",
     )
     if progress:
         progress(
-            f"Completado: {len(historical_sales)} ticket(s); nuevas ~{summary['nuevas']}, huérfanos {summary['errores']}.",
+            f"Completado: histórico {len(historical_sales)} ticket(s), turno {len(turno_rows)}; "
+            f"nuevas ~{summary['nuevas']}, turno_filas {summary.get('turno_filas', 0)}.",
             100.0,
         )
     return {
@@ -278,6 +510,7 @@ def _execute_single_sync(progress: Callable[[str, float], None] | None = None) -
         "tickets": len(historical_sales),
         "nuevas": summary["nuevas"],
         "errores": summary["errores"],
+        "turno_filas": summary.get("turno_filas", 0),
         "error": None,
     }
 
