@@ -42,6 +42,7 @@ a = Analysis(
                 'agent.windows.sync_config',
                 'agent_sync',
                 'dbfread',
+                'dbfread.field_parser',
                 *_http_hidden,
             ]
         )
