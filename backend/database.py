@@ -33,35 +33,36 @@ Base = declarative_base()
 
 
 def ensure_schema_columns() -> None:
-    """Añade columnas nuevas en instalaciones existentes (create_all no altera tablas)."""
-    try:
-        insp = inspect(engine)
-        names = insp.get_table_names()
-        is_sqlite = engine.dialect.name == "sqlite"
-        pagos_type = "TEXT" if is_sqlite else "JSONB"
+    """
+    Añade columnas nuevas en instalaciones existentes (create_all no altera tablas).
+    Propaga excepciones: el arranque de la app las captura y loguea; /sync/upload las reintenta
+    para que un fallo transitorio o un despliegue sin migración SQL manual se autocorrija cuando sea posible.
+    """
+    insp = inspect(engine)
+    names = insp.get_table_names()
+    is_sqlite = engine.dialect.name == "sqlite"
+    pagos_type = "TEXT" if is_sqlite else "JSONB"
+    propinas_type = "REAL" if is_sqlite else "DOUBLE PRECISION"
 
-        def statements_for_table(table: str) -> list[str]:
-            if table not in names:
-                return []
-            cols = {c["name"] for c in insp.get_columns(table)}
-            out: list[str] = []
-            if "pagos" not in cols:
-                out.append(f"ALTER TABLE {table} ADD COLUMN pagos {pagos_type}")
-            if "mesero_codigo" not in cols:
-                out.append(f"ALTER TABLE {table} ADD COLUMN mesero_codigo VARCHAR")
-            if "mesero_nombre" not in cols:
-                out.append(f"ALTER TABLE {table} ADD COLUMN mesero_nombre VARCHAR")
-            if "propinas" not in cols:
-                out.append(f"ALTER TABLE {table} ADD COLUMN propinas {'REAL' if is_sqlite else 'DOUBLE PRECISION'}")
-            return out
+    def statements_for_table(table: str) -> list[str]:
+        if table not in names:
+            return []
+        cols = {c["name"] for c in insp.get_columns(table)}
+        out: list[str] = []
+        if "pagos" not in cols:
+            out.append(f"ALTER TABLE {table} ADD COLUMN pagos {pagos_type}")
+        if "mesero_codigo" not in cols:
+            out.append(f"ALTER TABLE {table} ADD COLUMN mesero_codigo VARCHAR")
+        if "mesero_nombre" not in cols:
+            out.append(f"ALTER TABLE {table} ADD COLUMN mesero_nombre VARCHAR")
+        if "propinas" not in cols:
+            out.append(f"ALTER TABLE {table} ADD COLUMN propinas {propinas_type}")
+        return out
 
-        for tbl in ("ventas", "ventas_turno"):
-            for sql in statements_for_table(tbl):
-                with engine.begin() as conn:
-                    conn.execute(text(sql))
-    except Exception:
-        # No bloquear arranque; registrar para diagnosticar desajuste con migraciones Supabase.
-        logger.exception("ensure_schema_columns falló (revisar migraciones SQL y permisos en la DB)")
+    for tbl in ("ventas", "ventas_turno"):
+        for sql in statements_for_table(tbl):
+            with engine.begin() as conn:
+                conn.execute(text(sql))
 
 
 def get_db():

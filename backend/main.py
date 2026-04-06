@@ -31,10 +31,17 @@ def _on_startup():
     """Crea tablas si no existen. No mata el proceso si la DB tarda en responder."""
     try:
         Base.metadata.create_all(bind=engine)
-        ensure_schema_columns()
-        logger.info("create_all OK — tablas verificadas")
+        logger.info("create_all OK — tablas base verificadas")
     except Exception as exc:
         logger.error("create_all falló (se reintentará en la primera petición): %s", exc)
+    try:
+        ensure_schema_columns()
+        logger.info("ensure_schema_columns OK — columnas sync/dashboard al día")
+    except Exception:
+        logger.exception(
+            "ensure_schema_columns falló al arranque; el próximo POST /sync/upload reintentará "
+            "(o revisa permisos ALTER en la DB y migraciones Supabase)."
+        )
 
 app.add_middleware(
     CORSMiddleware,
@@ -1582,21 +1589,37 @@ def exportar_top_10_csv(
 # ================================
 # ENDPOINT INGESTA SYNC AGENT (Tarea 2.4/2.1)
 # ================================
+def _sync_float_field(v: Any, default: float = 0.0) -> float:
+    try:
+        return float(v if v is not None else default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _sync_optional_float(v: Any) -> float | None:
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def _sync_payload_to_venta_kwargs(v: dict) -> dict[str, Any]:
     return {
         "factura": v.get("factura"),
         "fecha": v.get("fecha"),
         "hora": v.get("hora"),
-        "total_pagado": v.get("total_pagado", 0),
-        "subtotal": v.get("subtotal", 0),
+        "total_pagado": _sync_float_field(v.get("total_pagado"), 0),
+        "subtotal": _sync_float_field(v.get("subtotal"), 0),
         "metodo_pago_tarjeta": v.get("metodo_pago_tarjeta", "N/A"),
-        "monto_tarjeta": v.get("monto_tarjeta", 0),
-        "monto_efectivo": v.get("monto_efectivo", 0),
+        "monto_tarjeta": _sync_float_field(v.get("monto_tarjeta"), 0),
+        "monto_efectivo": _sync_float_field(v.get("monto_efectivo"), 0),
         "pagos": v.get("pagos"),
         "mesero_codigo": v.get("mesero_codigo"),
         "mesero_nombre": v.get("mesero_nombre"),
-        "propinas": v.get("propinas"),
-        "detalles": v.get("detalles", []),
+        "propinas": _sync_optional_float(v.get("propinas")),
+        "detalles": v.get("detalles", []) if isinstance(v.get("detalles"), list) else [],
     }
 
 
@@ -1651,6 +1674,8 @@ def upload_sync_data(
     mesero_historial_backfill = 0
 
     try:
+        # Asegura columnas nuevas (p. ej. propinas) si el arranque falló o la DB no tenía migración aplicada.
+        ensure_schema_columns()
         for v in historial:
             orden = str(v.get("orden", "")).strip()
             if not orden:
