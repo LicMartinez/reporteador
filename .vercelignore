@@ -1,0 +1,13 @@
+# Solo se despliega el frontend; el API vive en Render.
+backend/
+agent/
+venv/
+.venv/
+__pycache__/
+*.py
+*.pyc
+supabase/
+scripts/
+test_api.py
+dbf_*.txt
+*.docx
