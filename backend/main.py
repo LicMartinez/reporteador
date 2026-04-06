@@ -8,6 +8,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 import logging
 
@@ -1605,6 +1607,114 @@ def _sync_optional_float(v: Any) -> float | None:
         return None
 
 
+def _sync_normalize_fecha(raw: Any) -> str:
+    """Parte YYYY-MM-DD aunque el agente envíe ISO con hora (p. ej. desde datetime en DBF)."""
+    s = str(raw or "").strip()
+    if len(s) >= 10 and s[4:5] == "-" and s[7:8] == "-":
+        return s[:10]
+    return s
+
+
+def _sync_normalize_hora(raw: Any) -> str:
+    """HH:MM estable desde '19:48', '19:48:00', '9:5', etc."""
+    s = str(raw or "").strip().replace(".", ":")
+    if not s:
+        return "00:00"
+    parts = [p for p in s.split(":") if p != ""]
+    if not parts:
+        return "00:00"
+    try:
+        h = int(parts[0])
+        m = int(parts[1]) if len(parts) > 1 else 0
+    except ValueError:
+        return "00:00"
+    h = max(0, min(23, h))
+    m = max(0, min(59, m))
+    return f"{h:02d}:{m:02d}"
+
+
+def _sync_venta_pk_parts(sucursal_nombre: str, v: dict, orden: str) -> tuple[str, str, str]:
+    fecha = _sync_normalize_fecha(v.get("fecha"))
+    hora = _sync_normalize_hora(v.get("hora"))
+    pk = f"{sucursal_nombre}_{fecha}_{hora}_{orden}"
+    return pk, fecha, hora
+
+
+def _dedupe_historial_por_pk(sucursal_nombre: str, historial: list) -> tuple[list, int]:
+    """Último gana por id compuesto; preserva entradas sin orden para los logs de error."""
+    seen: dict[str, dict] = {}
+    sin_orden: list[dict] = []
+    dupes = 0
+    for v in historial:
+        orden = str(v.get("orden", "")).strip()
+        if not orden:
+            sin_orden.append(v)
+            continue
+        pk, _, _ = _sync_venta_pk_parts(sucursal_nombre, v, orden)
+        if pk in seen:
+            dupes += 1
+        seen[pk] = v
+    return list(seen.values()) + sin_orden, dupes
+
+
+def _venta_row_dict(
+    pk: str,
+    sucursal_id: str,
+    orden: str,
+    kw: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "id": pk,
+        "sucursal_id": sucursal_id,
+        "orden": orden,
+        "factura": kw.get("factura"),
+        "fecha": kw.get("fecha"),
+        "hora": kw.get("hora"),
+        "total_pagado": kw.get("total_pagado", 0),
+        "subtotal": kw.get("subtotal", 0),
+        "metodo_pago_tarjeta": kw.get("metodo_pago_tarjeta", "N/A"),
+        "monto_tarjeta": kw.get("monto_tarjeta", 0),
+        "monto_efectivo": kw.get("monto_efectivo", 0),
+        "pagos": kw.get("pagos"),
+        "mesero_codigo": kw.get("mesero_codigo"),
+        "mesero_nombre": kw.get("mesero_nombre"),
+        "propinas": kw.get("propinas"),
+        "detalles": kw.get("detalles", []),
+        "created_at": datetime.now(timezone.utc).replace(tzinfo=None),
+    }
+
+
+def _insert_venta_idempotent(db: Session, row: dict[str, Any]) -> bool:
+    """
+    Inserta venta si no existe la PK. PostgreSQL/SQLite: ON CONFLICT DO NOTHING + RETURNING.
+    Evita 500 por reenvío de lote, réplicas de lectura o carreras entre workers.
+    """
+    tbl = models.Venta.__table__
+    dialect = db.get_bind().dialect.name
+    if dialect == "postgresql":
+        stmt = (
+            pg_insert(tbl)
+            .values(**row)
+            .on_conflict_do_nothing(index_elements=[tbl.c.id])
+            .returning(tbl.c.id)
+        )
+        res = db.execute(stmt)
+        return res.fetchone() is not None
+    if dialect == "sqlite":
+        stmt = (
+            sqlite_insert(tbl)
+            .values(**row)
+            .on_conflict_do_nothing(index_elements=[tbl.c.id])
+            .returning(tbl.c.id)
+        )
+        res = db.execute(stmt)
+        return res.fetchone() is not None
+    if db.get(models.Venta, row["id"]):
+        return False
+    db.add(models.Venta(**row))
+    return True
+
+
 def _sync_payload_to_venta_kwargs(v: dict) -> dict[str, Any]:
     return {
         "factura": v.get("factura"),
@@ -1676,7 +1786,14 @@ def upload_sync_data(
     try:
         # Asegura columnas nuevas (p. ej. propinas) si el arranque falló o la DB no tenía migración aplicada.
         ensure_schema_columns()
-        for v in historial:
+        historial_proc, historial_dupes = _dedupe_historial_por_pk(sucursal.nombre, historial)
+        if historial_dupes:
+            logger.info(
+                "sync %s: historial con %s filas duplicadas por PK (misma sucursal/fecha/hora/orden); se procesa la última",
+                sucursal_nombre_u,
+                historial_dupes,
+            )
+        for v in historial_proc:
             orden = str(v.get("orden", "")).strip()
             if not orden:
                 db.add(
@@ -1690,29 +1807,9 @@ def upload_sync_data(
                 errores_detectados += 1
                 continue
 
-            fecha = str(v.get("fecha") or "").strip()
-            hora = str(v.get("hora") or "").strip()
-            uuid_compuesto = f"{sucursal.nombre}_{fecha}_{hora}_{orden}"
-
-            # get() consulta el identity map antes que la DB: evita INSERT duplicado cuando el mismo ticket
-            # viene repetido en un lote (p. ej. 250 filas) sin flush intermedio; query().first() no ve pendientes.
+            uuid_compuesto, fecha_n, hora_n = _sync_venta_pk_parts(sucursal.nombre, v, orden)
             existe = db.get(models.Venta, uuid_compuesto)
-            if not existe:
-                kw = _sync_payload_to_venta_kwargs(v)
-                db_venta = models.Venta(
-                    id=uuid_compuesto,
-                    sucursal_id=sucursal.id,
-                    orden=orden,
-                    **kw,
-                )
-                db.add(db_venta)
-                nuevas_inserciones += 1
-                db.query(models.VentaTurno).filter(
-                    models.VentaTurno.sucursal_id == sucursal.id,
-                    models.VentaTurno.orden == orden,
-                ).delete(synchronize_session=False)
-            else:
-                # Las ventas ya insertadas no se volvían a tocar: backfill de mesero si venía NULL.
+            if existe:
                 kw = _sync_payload_to_venta_kwargs(v)
                 cod_p = str(kw.get("mesero_codigo") or "").strip()
                 nom_p = str(kw.get("mesero_nombre") or "").strip()
@@ -1723,6 +1820,18 @@ def upload_sync_data(
                         existe.mesero_codigo = kw.get("mesero_codigo")
                         existe.mesero_nombre = kw.get("mesero_nombre")
                         mesero_historial_backfill += 1
+                continue
+
+            kw = _sync_payload_to_venta_kwargs(v)
+            kw["fecha"] = fecha_n
+            kw["hora"] = hora_n
+            row = _venta_row_dict(uuid_compuesto, sucursal.id, orden, kw)
+            if _insert_venta_idempotent(db, row):
+                nuevas_inserciones += 1
+                db.query(models.VentaTurno).filter(
+                    models.VentaTurno.sucursal_id == sucursal.id,
+                    models.VentaTurno.orden == orden,
+                ).delete(synchronize_session=False)
 
         if "turno_actual" in payload:
             db.query(models.VentaTurno).filter(models.VentaTurno.sucursal_id == sucursal.id).delete(
