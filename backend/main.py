@@ -1690,9 +1690,13 @@ def upload_sync_data(
                 errores_detectados += 1
                 continue
 
-            uuid_compuesto = f"{sucursal.nombre}_{v.get('fecha')}_{v.get('hora')}_{orden}"
+            fecha = str(v.get("fecha") or "").strip()
+            hora = str(v.get("hora") or "").strip()
+            uuid_compuesto = f"{sucursal.nombre}_{fecha}_{hora}_{orden}"
 
-            existe = db.query(models.Venta).filter(models.Venta.id == uuid_compuesto).first()
+            # get() consulta el identity map antes que la DB: evita INSERT duplicado cuando el mismo ticket
+            # viene repetido en un lote (p. ej. 250 filas) sin flush intermedio; query().first() no ve pendientes.
+            existe = db.get(models.Venta, uuid_compuesto)
             if not existe:
                 kw = _sync_payload_to_venta_kwargs(v)
                 db_venta = models.Venta(
@@ -1738,6 +1742,8 @@ def upload_sync_data(
                     errores_detectados += 1
                     continue
                 tid = f"{sucursal.id}_{orden_t}"
+                if db.get(models.VentaTurno, tid):
+                    continue
                 kw_t = _sync_payload_to_venta_kwargs(v)
                 db.add(
                     models.VentaTurno(
