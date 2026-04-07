@@ -1719,6 +1719,53 @@ def _insert_venta_idempotent(db: Session, row: dict[str, Any]) -> bool:
     return True
 
 
+def _insert_venta_turno_idempotent(db: Session, row: dict[str, Any]) -> bool:
+    """Inserta en ventas_turno sin romper por PK duplicada."""
+    tbl = models.VentaTurno.__table__
+    dialect = db.get_bind().dialect.name
+    if dialect == "postgresql":
+        stmt = (
+            pg_insert(tbl)
+            .values(**row)
+            .on_conflict_do_nothing(index_elements=[tbl.c.id])
+            .returning(tbl.c.id)
+        )
+        res = db.execute(stmt)
+        return res.fetchone() is not None
+    if dialect == "sqlite":
+        stmt = (
+            sqlite_insert(tbl)
+            .values(**row)
+            .on_conflict_do_nothing(index_elements=[tbl.c.id])
+            .returning(tbl.c.id)
+        )
+        res = db.execute(stmt)
+        return res.fetchone() is not None
+    if db.get(models.VentaTurno, row["id"]):
+        return False
+    db.add(models.VentaTurno(**row))
+    return True
+
+
+def _dedupe_turno_por_orden(turno_rows: list) -> tuple[list, int]:
+    """
+    El snapshot FACTURA1T/2T puede traer ORDEN repetido.
+    Conservamos el último por ORDEN para evitar choques de PK en ventas_turno.
+    """
+    seen: dict[str, dict] = {}
+    sin_orden: list[dict] = []
+    dupes = 0
+    for v in turno_rows:
+        orden = str(v.get("orden", "")).strip()
+        if not orden:
+            sin_orden.append(v)
+            continue
+        if orden in seen:
+            dupes += 1
+        seen[orden] = v
+    return list(seen.values()) + sin_orden, dupes
+
+
 def _sync_payload_to_venta_kwargs(v: dict) -> dict[str, Any]:
     return {
         "factura": v.get("factura"),
@@ -1893,7 +1940,14 @@ def upload_sync_data(
             db.query(models.VentaTurno).filter(models.VentaTurno.sucursal_id == sucursal.id).delete(
                 synchronize_session=False
             )
-            for v in payload.get("turno_actual") or []:
+            turno_proc, turno_dupes = _dedupe_turno_por_orden(payload.get("turno_actual") or [])
+            if turno_dupes:
+                logger.info(
+                    "sync %s: turno_actual con %s ORDEN duplicado(s); se conserva la última fila por ORDEN",
+                    sucursal.nombre,
+                    turno_dupes,
+                )
+            for v in turno_proc:
                 orden_t = str(v.get("orden", "")).strip()
                 if not orden_t:
                     db.add(
@@ -1907,18 +1961,27 @@ def upload_sync_data(
                     errores_detectados += 1
                     continue
                 tid = f"{sucursal.id}_{orden_t}"
-                if db.get(models.VentaTurno, tid):
-                    continue
                 kw_t = _sync_payload_to_venta_kwargs(v)
-                db.add(
-                    models.VentaTurno(
-                        id=tid,
-                        sucursal_id=sucursal.id,
-                        orden=orden_t,
-                        **kw_t,
-                    )
-                )
-                turno_filas += 1
+                row_t = {
+                    "id": tid,
+                    "sucursal_id": sucursal.id,
+                    "orden": orden_t,
+                    "factura": kw_t.get("factura"),
+                    "fecha": _sync_normalize_fecha(kw_t.get("fecha")),
+                    "hora": _sync_normalize_hora(kw_t.get("hora")),
+                    "total_pagado": kw_t.get("total_pagado", 0),
+                    "subtotal": kw_t.get("subtotal", 0),
+                    "metodo_pago_tarjeta": kw_t.get("metodo_pago_tarjeta", "N/A"),
+                    "monto_tarjeta": kw_t.get("monto_tarjeta", 0),
+                    "monto_efectivo": kw_t.get("monto_efectivo", 0),
+                    "pagos": kw_t.get("pagos"),
+                    "mesero_codigo": kw_t.get("mesero_codigo"),
+                    "mesero_nombre": kw_t.get("mesero_nombre"),
+                    "propinas": kw_t.get("propinas"),
+                    "detalles": kw_t.get("detalles", []),
+                }
+                if _insert_venta_turno_idempotent(db, row_t):
+                    turno_filas += 1
 
         db.commit()
     except Exception as exc:
