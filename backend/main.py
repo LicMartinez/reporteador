@@ -8,6 +8,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy import cast, func
+from sqlalchemy.types import BigInteger
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
@@ -1733,23 +1735,18 @@ def _sync_payload_to_venta_kwargs(v: dict) -> dict[str, Any]:
     }
 
 
-@app.post("/sync/upload/{sucursal_nombre}", tags=["Sincronización"])
-def upload_sync_data(
+def _sync_resolve_sucursal_y_auth(
+    db: Session,
     sucursal_nombre: str,
-    payload: dict,
-    db: Session = Depends(get_db),
-    sucursal_password: str | None = Header(None, alias="X-Sucursal-Password"),
-):
-    """
-    Recepción del agente en cada PC.
-    Autenticación por sucursal: `X-Sucursal-Password`.
-    Body: `historial` (incremental FACTURA1/2), opcional `turno_actual` (snapshot FACTURA1T/2T por ciclo).
-    """
+    sucursal_password: str | None,
+    *,
+    actualizar_last_connection: bool,
+) -> models.Sucursal:
+    """Valida sucursal + X-Sucursal-Password para el agente (sync)."""
     sucursal_nombre_u = sucursal_nombre.strip().upper()
     sucursal = db.query(models.Sucursal).filter(models.Sucursal.nombre == sucursal_nombre_u).first()
 
     if not sucursal:
-        # La sucursal debe existir previamente en el portal admin.
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sucursal no registrada")
 
     if not sucursal.sync_password_hash:
@@ -1767,15 +1764,69 @@ def upload_sync_data(
         db.commit()
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenciales sync inválidas")
 
-    # Registrar última conexión exitosa.
-    try:
-        sucursal.last_connection_at = datetime.now(timezone.utc)
-        db.commit()
-    except Exception:
-        db.rollback()
+    if actualizar_last_connection:
+        try:
+            sucursal.last_connection_at = datetime.now(timezone.utc)
+            db.commit()
+        except Exception:
+            db.rollback()
 
     if sucursal.sync_paused:
         raise HTTPException(status_code=503, detail="Sync pausado para esta sucursal.")
+
+    return sucursal
+
+
+@app.get("/sync/last-orden/{sucursal_nombre}", tags=["Sincronización"])
+def sync_last_orden(
+    sucursal_nombre: str,
+    db: Session = Depends(get_db),
+    sucursal_password: str | None = Header(None, alias="X-Sucursal-Password"),
+):
+    """
+    Mayor `orden` numérico ya persistido para la sucursal (FACTURA1.ORDEN).
+    El agente lo usa para alinear el checkpoint local con la nube tras errores o otra PC.
+    """
+    sucursal = _sync_resolve_sucursal_y_auth(db, sucursal_nombre, sucursal_password, actualizar_last_connection=False)
+    try:
+        mx = (
+            db.query(func.max(cast(models.Venta.orden, BigInteger)))
+            .filter(models.Venta.sucursal_id == sucursal.id)
+            .scalar()
+        )
+    except Exception:
+        db.rollback()
+        rows = db.query(models.Venta.orden).filter(models.Venta.sucursal_id == sucursal.id).all()
+        if not rows:
+            return {"last_orden": None, "sucursal": sucursal.nombre}
+        mx = None
+        for row in rows:
+            o = row[0]
+            try:
+                n = int(str(o).strip())
+            except ValueError:
+                continue
+            mx = n if mx is None else max(mx, n)
+    if mx is None:
+        return {"last_orden": None, "sucursal": sucursal.nombre}
+    return {"last_orden": str(int(mx)), "sucursal": sucursal.nombre}
+
+
+@app.post("/sync/upload/{sucursal_nombre}", tags=["Sincronización"])
+def upload_sync_data(
+    sucursal_nombre: str,
+    payload: dict,
+    db: Session = Depends(get_db),
+    sucursal_password: str | None = Header(None, alias="X-Sucursal-Password"),
+):
+    """
+    Recepción del agente en cada PC.
+    Autenticación por sucursal: `X-Sucursal-Password`.
+    Body: `historial` (incremental FACTURA1/2), opcional `turno_actual` (snapshot FACTURA1T/2T por ciclo).
+    """
+    sucursal = _sync_resolve_sucursal_y_auth(
+        db, sucursal_nombre, sucursal_password, actualizar_last_connection=True
+    )
 
     historial = payload.get("historial") or []
     nuevas_inserciones = 0
@@ -1790,7 +1841,7 @@ def upload_sync_data(
         if historial_dupes:
             logger.info(
                 "sync %s: historial con %s filas duplicadas por PK (misma sucursal/fecha/hora/orden); se procesa la última",
-                sucursal_nombre_u,
+                sucursal.nombre,
                 historial_dupes,
             )
         for v in historial_proc:
@@ -1876,7 +1927,7 @@ def upload_sync_data(
             )
         )
         db.commit()
-        logger.exception("upload_sync_data falló (sucursal=%s)", sucursal_nombre_u)
+        logger.exception("upload_sync_data falló (sucursal=%s)", sucursal.nombre)
         detail = str(exc)
         if len(detail) > 1200:
             detail = detail[:1200] + "…"

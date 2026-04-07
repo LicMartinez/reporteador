@@ -379,11 +379,46 @@ def process_turno_actual(
     return out
 
 
+def fetch_remote_last_orden(settings: dict) -> str | None:
+    """
+    Consulta el mayor ORDEN ya guardado en el servidor para esta sucursal.
+    Misma autenticación que POST /sync/upload.
+    """
+    sync_api_url = settings["sync_api_url"].rstrip("/")
+    suc = settings["sucursal_nombre"].strip()
+    pwd = settings.get("sucursal_password") or ""
+    api_key = settings.get("sync_api_key") or ""
+    url = f"{sync_api_url}/sync/last-orden/{suc}"
+    headers: dict[str, str] = {}
+    if api_key:
+        headers["X-API-Key"] = api_key
+    if pwd:
+        headers["X-Sucursal-Password"] = pwd
+    with httpx.Client(timeout=60.0) as client:
+        r = client.get(url, headers=headers)
+        r.raise_for_status()
+        j = r.json()
+    lo = j.get("last_orden")
+    if lo is None:
+        return None
+    s = str(lo).strip()
+    return s if s else None
+
+
+def _effective_last_orden_str(local_checkpoint: str, remote_last: str | None) -> str:
+    """Mayor ORDEN numérico entre checkpoint local y API (alinear tras fallo o PC nueva)."""
+    lk = orden_sort_key(local_checkpoint) if (local_checkpoint or "").strip() else -1
+    rk = orden_sort_key(remote_last) if (remote_last or "").strip() else -1
+    best = max(lk, rk)
+    return str(best) if best >= 0 else ""
+
+
 def upload_sync(
     historial: List[dict],
     turno_actual: List[dict],
     settings: dict,
     on_chunk: Callable[[int, int], None] | None = None,
+    checkpoint_path: str | None = None,
 ) -> dict:
     sync_api_url = settings["sync_api_url"].rstrip("/")
     sucursal = settings["sucursal_nombre"].strip()
@@ -427,6 +462,9 @@ def upload_sync(
             errores += int(b.get("logs_huerfanos", 0))
             if is_last:
                 turno_filas += int(b.get("turno_actual_filas", 0))
+            if checkpoint_path and chunk:
+                top = max(chunk, key=lambda x: orden_sort_key(x["orden"]))
+                save_checkpoint(checkpoint_path, str(orden_sort_key(top["orden"])))
             if on_chunk:
                 on_chunk(chunk_num, n_chunks)
 
@@ -447,7 +485,20 @@ def _execute_single_sync(progress: Callable[[str, float], None] | None = None) -
     if progress:
         progress("Leyendo archivos DBC…", 5.0)
 
-    last = load_checkpoint(ck)
+    local_ck = load_checkpoint(ck)
+    remote_lo: str | None = None
+    try:
+        remote_lo = fetch_remote_last_orden(s)
+    except Exception as e:
+        logging.warning("No se pudo leer /sync/last-orden (se usa solo checkpoint local): %s", e)
+    last = _effective_last_orden_str(local_ck, remote_lo)
+    if remote_lo or local_ck:
+        logging.info(
+            "Checkpoint ORDEN: local=%r remoto=%r -> efectivo=%r",
+            local_ck or "",
+            remote_lo or "",
+            last or "(desde inicio)",
+        )
     tarjetas_map = get_tarjetas_map(dbc)
     meseros_map = get_meseros_map(dbc)
     if progress:
@@ -481,7 +532,13 @@ def _execute_single_sync(progress: Callable[[str, float], None] | None = None) -
         len(turno_rows),
     )
     try:
-        summary = upload_sync(historical_sales, turno_rows, s, on_chunk=on_chunk if historical_sales else None)
+        summary = upload_sync(
+            historical_sales,
+            turno_rows,
+            s,
+            on_chunk=on_chunk if historical_sales else None,
+            checkpoint_path=ck if ck else None,
+        )
     except Exception as e:
         logging.exception("Fallo en sync: %s", e)
         if progress:
@@ -494,10 +551,6 @@ def _execute_single_sync(progress: Callable[[str, float], None] | None = None) -
             "turno_filas": 0,
             "error": str(e),
         }
-
-    if historical_sales:
-        max_orden = max(historical_sales, key=lambda x: orden_sort_key(x["orden"]))["orden"]
-        save_checkpoint(ck, max_orden)
 
     logging.info(
         "Sync OK — insertadas histórico ~%s, turno_filas=%s, huérfanos=%s, checkpoint=%s",
