@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-"""Dashboard Sync SW — ventana de configuracion (Tkinter)."""
+"""Dashboard Sync SW - ventana de configuracion (Tkinter)."""
 from __future__ import annotations
 
 import os
@@ -195,7 +195,7 @@ def main() -> None:
                 messagebox.showinfo("API", f"Sync OK: {r2.text[:500]}")
             else:
                 body = (r2.text or "")[:900]
-                messagebox.showwarning("API", f"POST sync/upload → HTTP {r2.status_code}\n{body}")
+                messagebox.showwarning("API", f"POST sync/upload ? HTTP {r2.status_code}\n{body}")
         except Exception as e:
             messagebox.showerror("API", f"Error en POST sync: {e}")
 
@@ -306,7 +306,7 @@ def main() -> None:
     hint = ttk.Label(
         frm,
         text="El agente corre en segundo plano sin ventana (Administrador de tareas). "
-        "Se inicia al abrir esta ventana y al pulsar Salir. "
+        "Se inicia al pulsar Salir. "
         "Usa el mayor ORDEN entre checkpoint local y el servidor para continuar. "
         "Si ambos faltan, aplica los filtros de primera carga.",
         font=("Segoe UI", 8),
@@ -336,3 +336,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

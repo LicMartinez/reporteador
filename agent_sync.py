@@ -4,6 +4,7 @@ import time
 import datetime
 import logging
 import sys
+import math
 from typing import Any, Callable, Dict, List
 
 import httpx
@@ -202,7 +203,8 @@ def resolve_mesero_codigo(
 
 def _float(v: Any) -> float:
     try:
-        return float(v or 0)
+        n = float(v or 0)
+        return n if math.isfinite(n) else 0.0
     except (TypeError, ValueError):
         return 0.0
 
@@ -494,7 +496,9 @@ def upload_sync(
         if not historial:
             body: dict = {"turno_actual": turno_actual}
             resp = client.post(url, json=body, headers=headers)
-            resp.raise_for_status()
+            if resp.status_code >= 400:
+                txt = (resp.text or "")[:1200]
+                raise RuntimeError(f"HTTP {resp.status_code} en /sync/upload: {txt}")
             b = resp.json()
             total_new += int(b.get("nuevas_ventas_historial_insertadas", 0))
             errores += int(b.get("logs_huerfanos", 0))
@@ -509,7 +513,9 @@ def upload_sync(
             if is_last:
                 body["turno_actual"] = turno_actual
             resp = client.post(url, json=body, headers=headers)
-            resp.raise_for_status()
+            if resp.status_code >= 400:
+                txt = (resp.text or "")[:1200]
+                raise RuntimeError(f"HTTP {resp.status_code} en /sync/upload (lote {chunk_num}/{n_chunks}): {txt}")
             b = resp.json()
             total_new += int(b.get("nuevas_ventas_historial_insertadas", 0))
             errores += int(b.get("logs_huerfanos", 0))

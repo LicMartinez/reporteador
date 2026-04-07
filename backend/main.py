@@ -1595,7 +1595,8 @@ def exportar_top_10_csv(
 # ================================
 def _sync_float_field(v: Any, default: float = 0.0) -> float:
     try:
-        return float(v if v is not None else default)
+        n = float(v if v is not None else default)
+        return n if n == n and n not in (float("inf"), float("-inf")) else default
     except (TypeError, ValueError):
         return default
 
@@ -1604,7 +1605,8 @@ def _sync_optional_float(v: Any) -> float | None:
     if v is None:
         return None
     try:
-        return float(v)
+        n = float(v)
+        return n if n == n and n not in (float("inf"), float("-inf")) else None
     except (TypeError, ValueError):
         return None
 
@@ -1836,7 +1838,10 @@ def upload_sync_data(
 
     try:
         # Asegura columnas nuevas (p. ej. propinas) si el arranque falló o la DB no tenía migración aplicada.
-        ensure_schema_columns()
+        try:
+            ensure_schema_columns()
+        except Exception:
+            logger.exception("ensure_schema_columns falló durante /sync/upload; se continúa con esquema actual")
         historial_proc, historial_dupes = _dedupe_historial_por_pk(sucursal.nombre, historial)
         if historial_dupes:
             logger.info(
