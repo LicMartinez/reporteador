@@ -15,6 +15,8 @@ import {
   createSwissDashboardUser,
   createSwissPortalAdmin,
   createSwissSucursal,
+  deleteSwissDashboardUser,
+  deleteSwissSucursal,
   deleteSwissPortalAdmin,
   deleteSwissSucursalVentasImportadas,
   fetchSwissCatalogos,
@@ -24,6 +26,7 @@ import {
   fetchSwissSucursalLogs,
   patchSwissDashboardUser,
   patchSwissDashboardUserAccess,
+  patchSwissSucursal,
   updateSwissCatalogo,
   patchSwissPortalAdmin,
   patchSwissPortalAdminPassword,
@@ -62,6 +65,7 @@ function SwissDashboardUserCard({
   busy,
   onAccessSave,
   onProfileSave,
+  onDeleteUser,
 }: {
   u: SwissAdminUserBrief;
   sucursales: SwissSucursalBrief[];
@@ -77,6 +81,7 @@ function SwissDashboardUserCard({
       catalogo_maestro_id: string | null;
     }
   ) => Promise<void>;
+  onDeleteUser: (userId: string, email: string) => Promise<void>;
 }) {
   const [pw, setPw] = useState('');
   const [nombre, setNombre] = useState(u.nombre ?? '');
@@ -203,6 +208,14 @@ function SwissDashboardUserCard({
           }}
         >
           Guardar perfil
+        </button>
+        <button
+          type="button"
+          className="w-full sm:w-auto px-4 py-2 rounded-xl bg-red-600 text-white text-sm font-semibold hover:bg-red-700 disabled:opacity-60"
+          disabled={busy}
+          onClick={() => void onDeleteUser(u.id, u.email)}
+        >
+          Eliminar usuario
         </button>
       </div>
     </div>
@@ -423,6 +436,59 @@ export default function SwissAdminPortal() {
       await loadAll();
     } catch {
       setErr('No se pudo guardar el perfil del usuario.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onDeleteDashboardUser(userId: string, email: string) {
+    const ok = window.confirm(`¿Eliminar usuario ${email}? Esta acción no se puede deshacer.`);
+    if (!ok) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      await deleteSwissDashboardUser(userId);
+      await loadAll();
+    } catch {
+      setErr('No se pudo eliminar el usuario.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onResetSucursalPassword(sucursalId: string, sucursalNombre: string) {
+    const np = window.prompt(`Nueva contraseña sync para ${sucursalNombre} (mín. 6 caracteres):`, '');
+    if (np == null) return;
+    const trimmed = np.trim();
+    if (trimmed.length < 6) {
+      setErr('La nueva contraseña de sucursal debe tener al menos 6 caracteres.');
+      return;
+    }
+    setBusy(true);
+    setErr(null);
+    try {
+      await patchSwissSucursal(sucursalId, { sync_password: trimmed });
+      await loadAll();
+    } catch {
+      setErr('No se pudo actualizar la contraseña de la sucursal.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onDeleteSucursal(sucursalId: string, sucursalNombre: string) {
+    const ok = window.confirm(
+      `¿Eliminar sucursal ${sucursalNombre}?\nSe eliminarán histórico, turno, logs y asignaciones relacionadas.`
+    );
+    if (!ok) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      await deleteSwissSucursal(sucursalId);
+      if (selectedSucursalId === sucursalId) setSelectedSucursalId('');
+      await loadAll();
+    } catch {
+      setErr('No se pudo eliminar la sucursal.');
     } finally {
       setBusy(false);
     }
@@ -682,6 +748,13 @@ export default function SwissAdminPortal() {
                       <div className="mt-3 pt-3 border-t border-slate-100 flex flex-wrap gap-2">
                         <button
                           type="button"
+                          onClick={() => void onResetSucursalPassword(s.id, s.nombre)}
+                          className="px-3 py-2 rounded-xl text-sm font-semibold border border-blue-600 text-blue-900 bg-white hover:bg-blue-50 transition"
+                        >
+                          Cambiar contraseña
+                        </button>
+                        <button
+                          type="button"
                           onClick={() => openPurgeModal(s, 'completo')}
                           className="px-3 py-2 rounded-xl text-sm font-semibold border border-amber-700 text-amber-900 bg-white hover:bg-amber-50 transition"
                         >
@@ -693,6 +766,13 @@ export default function SwissAdminPortal() {
                           className="px-3 py-2 rounded-xl text-sm font-semibold border border-violet-600 text-violet-900 bg-white hover:bg-violet-50 transition"
                         >
                           Borra por fechas
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void onDeleteSucursal(s.id, s.nombre)}
+                          className="px-3 py-2 rounded-xl text-sm font-semibold border border-red-600 text-red-700 bg-white hover:bg-red-50 transition"
+                        >
+                          Eliminar sucursal
                         </button>
                       </div>
                     </div>
@@ -844,6 +924,7 @@ export default function SwissAdminPortal() {
                       busy={busy}
                       onAccessSave={onUpdateUserAccess}
                       onProfileSave={onSaveUserProfile}
+                      onDeleteUser={onDeleteDashboardUser}
                     />
                   ))}
                   {!dashboardUsers.length && <p className="text-sm text-slate-500">No hay usuarios.</p>}

@@ -128,6 +128,10 @@ class SwissAdminCreateSucursalRequest(BaseModel):
     sync_password: str = Field(min_length=6, max_length=256)
 
 
+class SwissAdminUpdateSucursalRequest(BaseModel):
+    sync_password: Optional[str] = Field(default=None, min_length=6, max_length=256)
+
+
 class SwissAdminCreateDashboardUserRequest(BaseModel):
     email: str = Field(min_length=3, max_length=255)
     password: str = Field(min_length=6, max_length=256)

@@ -201,6 +201,17 @@ export async function createSwissSucursal(nombre: string, sync_password: string)
   return data;
 }
 
+export async function patchSwissSucursal(sucursal_id: string, body: { sync_password?: string }) {
+  const { data } = await api.patch<SwissSucursalBrief>(`/swiss-admin/sucursales/${sucursal_id}`, body);
+  return data;
+}
+
+export async function deleteSwissSucursal(sucursal_id: string) {
+  // POST /delete: mismo efecto que DELETE; evita 405 en proxies o despliegues que no exponen DELETE.
+  const { data } = await api.post(`/swiss-admin/sucursales/${sucursal_id}/delete`);
+  return data;
+}
+
 export async function fetchSwissSucursalLogs(sucursal_id: string, limit = 50) {
   const { data } = await api.get<SwissSucursalLogsItem[]>(`/swiss-admin/sucursales/${sucursal_id}/logs`, {
     params: { limit },
@@ -271,6 +282,11 @@ export async function patchSwissDashboardUser(
   return data;
 }
 
+export async function deleteSwissDashboardUser(user_id: string) {
+  const { data } = await api.post(`/swiss-admin/users/${user_id}/delete`);
+  return data;
+}
+
 export async function fetchSwissCatalogos() {
   const { data } = await api.get<SwissCatalogoBrief[]>('/swiss-admin/catalogos');
   return data;
@@ -315,7 +331,7 @@ export async function patchSwissPortalAdminPassword(user_id: string, body: { old
 }
 
 export async function deleteSwissPortalAdmin(user_id: string) {
-  const { data } = await api.delete(`/swiss-admin/config/admin-users/${user_id}`);
+  const { data } = await api.post(`/swiss-admin/config/admin-users/${user_id}/delete`);
   return data;
 }
 

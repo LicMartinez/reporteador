@@ -6,9 +6,9 @@ from typing import Any, List, Optional
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy import cast, func
+from sqlalchemy import cast, func, select, text, update
 from sqlalchemy.types import BigInteger
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -322,6 +322,74 @@ def swiss_admin_create_sucursal(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="No se pudo crear la sucursal") from exc
 
     return schemas.SwissSucursalBrief(id=suc.id, nombre=suc.nombre, last_connection_at=_dt_to_iso(suc.last_connection_at))
+
+
+def _swiss_admin_purge_sucursal_relations(db: Session, suc: models.Sucursal) -> None:
+    """
+    Elimina en Supabase/Postgres toda la información ligada a la sucursal antes de borrar la fila:
+    accesos de usuarios, catálogo compartido, turno actual, histórico de ventas, logs de sync
+    (incluye checkpoint vía fila `sucursales`).
+    """
+    db.query(models.UsuarioSucursal).filter(models.UsuarioSucursal.sucursal_id == suc.id).delete(synchronize_session=False)
+    db.query(models.CatalogoMaestroSucursal).filter(models.CatalogoMaestroSucursal.sucursal_id == suc.id).delete(
+        synchronize_session=False
+    )
+    db.query(models.VentaTurno).filter(models.VentaTurno.sucursal_id == suc.id).delete(synchronize_session=False)
+    db.query(models.Venta).filter(models.Venta.sucursal_id == suc.id).delete(synchronize_session=False)
+    db.query(models.LogSync).filter(models.LogSync.sucursal_id == suc.id).delete(synchronize_session=False)
+
+
+def _swiss_admin_delete_sucursal_core(db: Session, user: models.Usuario, sucursal_id: str) -> dict[str, str]:
+    _require_admin(user)
+    suc = db.query(models.Sucursal).filter(models.Sucursal.id == sucursal_id).first()
+    if not suc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sucursal no registrada")
+    _swiss_admin_purge_sucursal_relations(db, suc)
+    db.delete(suc)
+    db.commit()
+    return {"status": "ok"}
+
+
+@app.patch("/swiss-admin/sucursales/{sucursal_id}", response_model=schemas.SwissSucursalBrief, tags=["SwissAdmin"])
+def swiss_admin_update_sucursal(
+    sucursal_id: str,
+    body: schemas.SwissAdminUpdateSucursalRequest,
+    user: models.Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _require_admin(user)
+    suc = db.query(models.Sucursal).filter(models.Sucursal.id == sucursal_id).first()
+    if not suc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sucursal no registrada")
+
+    payload = body.model_dump(exclude_unset=True)
+    if "sync_password" in payload and payload["sync_password"]:
+        suc.sync_password_hash = hash_password(payload["sync_password"])
+    db.commit()
+    db.refresh(suc)
+    return schemas.SwissSucursalBrief(id=suc.id, nombre=suc.nombre, last_connection_at=_dt_to_iso(suc.last_connection_at))
+
+
+@app.delete("/swiss-admin/sucursales/{sucursal_id}", tags=["SwissAdmin"])
+def swiss_admin_delete_sucursal(
+    sucursal_id: str,
+    user: models.Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return _swiss_admin_delete_sucursal_core(db, user, sucursal_id)
+
+
+@app.post("/swiss-admin/sucursales/{sucursal_id}/delete", tags=["SwissAdmin"])
+def swiss_admin_delete_sucursal_post(
+    sucursal_id: str,
+    user: models.Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Misma semántica que DELETE /swiss-admin/sucursales/{id}; vía POST para entornos que
+    devuelven 405 a DELETE (proxy, CDN, despliegues antiguos).
+    """
+    return _swiss_admin_delete_sucursal_core(db, user, sucursal_id)
 
 
 @app.get("/admin/users", response_model=List[schemas.AdminUserBrief], tags=["Admin"])
@@ -778,20 +846,32 @@ def swiss_admin_change_portal_admin_password(
     return {"status": "ok"}
 
 
+def _swiss_admin_delete_portal_admin_core(db: Session, requester: models.Usuario, user_id: str) -> dict[str, str]:
+    _require_admin(requester)
+    admin = db.query(models.Usuario).filter(models.Usuario.id == user_id, models.Usuario.portal_admin == True).first()
+    if not admin:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="admin no encontrado")
+    db.delete(admin)
+    db.commit()
+    return {"status": "ok"}
+
+
 @app.delete("/swiss-admin/config/admin-users/{user_id}", tags=["SwissAdmin"])
 def swiss_admin_delete_portal_admin(
     user_id: str,
     requester: models.Usuario = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    _require_admin(requester)
-    admin = db.query(models.Usuario).filter(models.Usuario.id == user_id, models.Usuario.portal_admin == True).first()
-    if not admin:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="admin no encontrado")
+    return _swiss_admin_delete_portal_admin_core(db, requester, user_id)
 
-    db.delete(admin)
-    db.commit()
-    return {"status": "ok"}
+
+@app.post("/swiss-admin/config/admin-users/{user_id}/delete", tags=["SwissAdmin"])
+def swiss_admin_delete_portal_admin_post(
+    user_id: str,
+    requester: models.Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return _swiss_admin_delete_portal_admin_core(db, requester, user_id)
 
 
 @app.patch("/swiss-admin/config/admin-users/{user_id}", response_model=schemas.SwissAdminUserBrief, tags=["SwissAdmin"])
@@ -874,6 +954,21 @@ def _swiss_user_brief_from_db(db: Session, db_user: models.Usuario) -> schemas.S
     )
 
 
+def _swiss_admin_delete_dashboard_user_core(
+    db: Session, requester: models.Usuario, user_id: str
+) -> dict[str, str]:
+    _require_admin(requester)
+    db_user = db.query(models.Usuario).filter(models.Usuario.id == user_id, models.Usuario.portal_admin == False).first()
+    if not db_user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado")
+    db.query(models.UsuarioSucursal).filter(models.UsuarioSucursal.usuario_id == db_user.id).delete(
+        synchronize_session=False
+    )
+    db.delete(db_user)
+    db.commit()
+    return {"status": "ok"}
+
+
 @app.patch("/swiss-admin/users/{user_id}", response_model=schemas.SwissAdminUserBrief, tags=["SwissAdmin"])
 def swiss_admin_update_dashboard_user(
     user_id: str,
@@ -941,6 +1036,27 @@ def swiss_admin_update_dashboard_user(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="No se pudo actualizar el usuario") from exc
 
     return _swiss_user_brief_from_db(db, db_user)
+
+
+@app.delete("/swiss-admin/users/{user_id}", tags=["SwissAdmin"])
+def swiss_admin_delete_dashboard_user(
+    user_id: str,
+    requester: models.Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return _swiss_admin_delete_dashboard_user_core(db, requester, user_id)
+
+
+@app.post("/swiss-admin/users/{user_id}/delete", tags=["SwissAdmin"])
+def swiss_admin_delete_dashboard_user_post(
+    user_id: str,
+    requester: models.Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Misma semántica que DELETE /swiss-admin/users/{id}; POST evita 405 cuando DELETE está bloqueado.
+    """
+    return _swiss_admin_delete_dashboard_user_core(db, requester, user_id)
 
 
 @app.get("/")
@@ -1027,6 +1143,22 @@ def _ventas_en_rango(
         q = q.filter(models.Venta.sucursal_id == sucursal_id)
 
     q = q.filter(models.Venta.fecha >= fecha_desde, models.Venta.fecha <= fecha_hasta)
+    q = q.options(
+        load_only(
+            models.Venta.orden,
+            models.Venta.fecha,
+            models.Venta.hora,
+            models.Venta.total_pagado,
+            models.Venta.monto_efectivo,
+            models.Venta.monto_tarjeta,
+            models.Venta.metodo_pago_tarjeta,
+            models.Venta.pagos,
+            models.Venta.mesero_codigo,
+            models.Venta.mesero_nombre,
+            models.Venta.propinas,
+            models.Venta.detalles,
+        )
+    )
     return q.all()
 
 
@@ -1054,6 +1186,22 @@ def _ventas_turno_en_rango(
         q = q.filter(models.VentaTurno.sucursal_id == sucursal_id)
 
     q = q.filter(models.VentaTurno.fecha >= fecha_desde, models.VentaTurno.fecha <= fecha_hasta)
+    q = q.options(
+        load_only(
+            models.VentaTurno.orden,
+            models.VentaTurno.fecha,
+            models.VentaTurno.hora,
+            models.VentaTurno.total_pagado,
+            models.VentaTurno.monto_efectivo,
+            models.VentaTurno.monto_tarjeta,
+            models.VentaTurno.metodo_pago_tarjeta,
+            models.VentaTurno.pagos,
+            models.VentaTurno.mesero_codigo,
+            models.VentaTurno.mesero_nombre,
+            models.VentaTurno.propinas,
+            models.VentaTurno.detalles,
+        )
+    )
     return q.all()
 
 
@@ -1845,17 +1993,32 @@ def sync_last_orden(
         )
     except Exception:
         db.rollback()
-        rows = db.query(models.Venta.orden).filter(models.Venta.sucursal_id == sucursal.id).all()
-        if not rows:
-            return {"last_orden": None, "sucursal": sucursal.nombre}
+        dialect = db.get_bind().dialect.name
         mx = None
-        for row in rows:
-            o = row[0]
+        if dialect == "postgresql":
             try:
-                n = int(str(o).strip())
-            except ValueError:
-                continue
-            mx = n if mx is None else max(mx, n)
+                mx = db.execute(
+                    text(
+                        """
+                        SELECT MAX(CAST(orden AS BIGINT))
+                        FROM ventas
+                        WHERE sucursal_id = :sid AND orden ~ '^[0-9]+$'
+                        """
+                    ),
+                    {"sid": sucursal.id},
+                ).scalar()
+            except Exception:
+                db.rollback()
+                mx = None
+        if mx is None:
+            stmt = select(models.Venta.orden).where(models.Venta.sucursal_id == sucursal.id)
+            res = db.execute(stmt)
+            for o in res.scalars().yield_per(4000):
+                try:
+                    n = int(str(o).strip())
+                except ValueError:
+                    continue
+                mx = n if mx is None else max(mx, n)
     if mx is None:
         return {"last_orden": None, "sucursal": sucursal.nombre}
     return {"last_orden": str(int(mx)), "sucursal": sucursal.nombre}
@@ -1911,17 +2074,27 @@ def upload_sync_data(
                 continue
 
             uuid_compuesto, fecha_n, hora_n = _sync_venta_pk_parts(sucursal.nombre, v, orden)
-            existe = db.get(models.Venta, uuid_compuesto)
-            if existe:
+            mesero_existente = db.execute(
+                select(models.Venta.mesero_codigo, models.Venta.mesero_nombre).where(
+                    models.Venta.id == uuid_compuesto
+                )
+            ).first()
+            if mesero_existente is not None:
                 kw = _sync_payload_to_venta_kwargs(v)
                 cod_p = str(kw.get("mesero_codigo") or "").strip()
                 nom_p = str(kw.get("mesero_nombre") or "").strip()
                 if cod_p or nom_p:
-                    ex_cod = str(existe.mesero_codigo or "").strip()
-                    ex_nom = str(existe.mesero_nombre or "").strip()
+                    ex_cod = str(mesero_existente[0] or "").strip()
+                    ex_nom = str(mesero_existente[1] or "").strip()
                     if not ex_cod and not ex_nom:
-                        existe.mesero_codigo = kw.get("mesero_codigo")
-                        existe.mesero_nombre = kw.get("mesero_nombre")
+                        db.execute(
+                            update(models.Venta)
+                            .where(models.Venta.id == uuid_compuesto)
+                            .values(
+                                mesero_codigo=kw.get("mesero_codigo"),
+                                mesero_nombre=kw.get("mesero_nombre"),
+                            )
+                        )
                         mesero_historial_backfill += 1
                 continue
 
@@ -1984,6 +2157,7 @@ def upload_sync_data(
                     turno_filas += 1
 
         db.commit()
+        db.expunge_all()
     except Exception as exc:
         db.rollback()
         db.add(
