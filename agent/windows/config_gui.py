@@ -30,8 +30,8 @@ from agent.windows.sync_config import (
 def main() -> None:
     root = tk.Tk()
     root.title("Dashboard Sync SW — Configuracion")
-    root.geometry("640x560")
-    root.minsize(560, 480)
+    root.geometry("760x680")
+    root.minsize(680, 620)
 
     base = default_config_dict()
     file_data = load_config_file()
@@ -86,6 +86,33 @@ def main() -> None:
     ttk.Entry(frm, textvariable=batch_var, width=12).grid(row=row, column=1, sticky="w", pady=4)
     row += 1
 
+    ttk.Separator(frm, orient="horizontal").grid(row=row, column=0, columnspan=3, sticky="ew", pady=(8, 6))
+    row += 1
+    ttk.Label(frm, text="Primera carga / fallback (si no hay checkpoint remoto-local):", font=("Segoe UI", 9, "bold")).grid(
+        row=row, column=0, columnspan=3, sticky="w", pady=(0, 4)
+    )
+    row += 1
+
+    ttk.Label(frm, text="Maximo meses hacia atras (0 = sin limite):").grid(row=row, column=0, sticky="w", pady=4)
+    init_months_var = tk.StringVar(value=str(cfg.get("initial_max_months_back", 18)))
+    ttk.Entry(frm, textvariable=init_months_var, width=12).grid(row=row, column=1, sticky="w", pady=4)
+    row += 1
+
+    ttk.Label(frm, text="Fecha inicial manual (YYYY-MM-DD, opcional):").grid(row=row, column=0, sticky="w", pady=4)
+    init_date_var = tk.StringVar(value=str(cfg.get("initial_since_date", "")))
+    ttk.Entry(frm, textvariable=init_date_var, width=20).grid(row=row, column=1, sticky="w", pady=4)
+    row += 1
+
+    ttk.Label(frm, text="Orden minima manual (opcional):").grid(row=row, column=0, sticky="w", pady=4)
+    init_orden_var = tk.StringVar(value=str(cfg.get("initial_min_orden", "")))
+    ttk.Entry(frm, textvariable=init_orden_var, width=20).grid(row=row, column=1, sticky="w", pady=4)
+    row += 1
+
+    ttk.Label(frm, text="Factura minima manual (opcional):").grid(row=row, column=0, sticky="w", pady=4)
+    init_factura_var = tk.StringVar(value=str(cfg.get("initial_min_factura", "")))
+    ttk.Entry(frm, textvariable=init_factura_var, width=20).grid(row=row, column=1, sticky="w", pady=4)
+    row += 1
+
     path_lbl = ttk.Label(frm, text=f"Archivo: {default_config_path()}", font=("Segoe UI", 8), foreground="#555")
     path_lbl.grid(row=row, column=0, columnspan=3, sticky="w", pady=(12, 4))
     row += 1
@@ -107,6 +134,10 @@ def main() -> None:
             bs = int(batch_var.get().strip() or "250")
         except ValueError:
             bs = 250
+        try:
+            init_months = int(init_months_var.get().strip() or "18")
+        except ValueError:
+            init_months = 18
         return {
             "dbc_dir": dbc_var.get().strip(),
             "sucursal_nombre": nom_var.get().strip(),
@@ -115,6 +146,10 @@ def main() -> None:
             "sync_api_key": key_var.get().strip(),
             "loop_seconds": lo,
             "batch_size": bs,
+            "initial_max_months_back": max(0, init_months),
+            "initial_since_date": init_date_var.get().strip(),
+            "initial_min_orden": init_orden_var.get().strip(),
+            "initial_min_factura": init_factura_var.get().strip(),
         }
 
     def on_save():
@@ -271,7 +306,9 @@ def main() -> None:
     hint = ttk.Label(
         frm,
         text="El agente corre en segundo plano sin ventana (Administrador de tareas). "
-        "Se inicia al abrir esta ventana y al pulsar Salir. Intervalo bucle > 0 para repeticion continua.",
+        "Se inicia al abrir esta ventana y al pulsar Salir. "
+        "Usa el mayor ORDEN entre checkpoint local y el servidor para continuar. "
+        "Si ambos faltan, aplica los filtros de primera carga.",
         font=("Segoe UI", 8),
         foreground="#555",
         wraplength=600,
