@@ -1,5 +1,5 @@
 #define MyAppName "Dashboard Sync SW"
-#define MyAppVersion "1.1.0"
+#define MyAppVersion "1.2.0"
 #define MyAppPublisher "Swiss Tools"
 #define MyAppURL "https://github.com/LicMartinez/reporteador"
 #define MyAppExeName "DashboardSyncSW.exe"

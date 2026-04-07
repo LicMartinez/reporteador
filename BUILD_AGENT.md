@@ -68,7 +68,7 @@ Los `.spec` empaquetan la pila HTTP y tienen **UPX desactivado**, lo que suele r
 
 1. Abrir `agent/windows/DashboardSyncSW.iss` en Inno Setup Compiler.
 2. **Build → Compile**.
-3. Instalador: `output_installer/DashboardSyncSW-Setup-1.1.0.exe` (cambia `#define MyAppVersion` en el `.iss` si subes versión).
+3. Instalador: `output_installer/DashboardSyncSW-Setup-1.2.0.exe` (cambia `#define MyAppVersion` en el `.iss` si subes versión).
 
 Antes de compilar, verifica que existan los dos `.exe` en `dist/` y `agent/windows/assets/icono_sincronizador.ico` (o `app.ico` como respaldo).
 
