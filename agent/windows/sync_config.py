@@ -40,11 +40,6 @@ def default_config_dict() -> dict:
         "sync_api_key": "",
         "loop_seconds": 300,
         "batch_size": 250,
-        # Primeras cargas: limitar ventana histórica y/o definir punto de arranque manual.
-        "initial_max_months_back": 18,
-        "initial_since_date": "",
-        "initial_min_orden": "",
-        "initial_min_factura": "",
     }
 
 
@@ -88,17 +83,6 @@ def merged_config() -> dict:
         out["batch_size"] = _parse_int(os.environ.get("SYNC_BATCH_SIZE"), out["batch_size"])
     if os.environ.get("SYNC_LOOP_SECONDS") is not None:
         out["loop_seconds"] = _parse_int(os.environ.get("SYNC_LOOP_SECONDS"), out["loop_seconds"])
-    if os.environ.get("SYNC_INITIAL_MAX_MONTHS_BACK") is not None:
-        out["initial_max_months_back"] = _parse_int(
-            os.environ.get("SYNC_INITIAL_MAX_MONTHS_BACK"),
-            out.get("initial_max_months_back", 18),
-        )
-    if os.environ.get("SYNC_INITIAL_SINCE_DATE") is not None:
-        out["initial_since_date"] = os.environ.get("SYNC_INITIAL_SINCE_DATE", "").strip()
-    if os.environ.get("SYNC_INITIAL_MIN_ORDEN") is not None:
-        out["initial_min_orden"] = os.environ.get("SYNC_INITIAL_MIN_ORDEN", "").strip()
-    if os.environ.get("SYNC_INITIAL_MIN_FACTURA") is not None:
-        out["initial_min_factura"] = os.environ.get("SYNC_INITIAL_MIN_FACTURA", "").strip()
 
     data_dir = ensure_data_dir()
     out["data_dir"] = str(data_dir)
@@ -124,10 +108,6 @@ def save_config_file(cfg: dict, path: Path | None = None) -> Path:
         "sync_api_key",
         "loop_seconds",
         "batch_size",
-        "initial_max_months_back",
-        "initial_since_date",
-        "initial_min_orden",
-        "initial_min_factura",
         "checkpoint_path",
     )
     to_write = {k: cfg.get(k) for k in keys}

@@ -87,6 +87,9 @@ def _months_ago(base: datetime.date, months: int) -> datetime.date:
     return datetime.date(y, m, d)
 
 
+INITIAL_LOAD_MAX_MONTHS_BACK = 18
+
+
 def load_checkpoint(path: str) -> str:
     if not os.path.isfile(path):
         return ""
@@ -364,11 +367,6 @@ def process_historical(
     tarjetas_map: dict,
     meseros_map: dict,
     last_orden: str,
-    *,
-    initial_max_months_back: int = 18,
-    initial_since_date: str = "",
-    initial_min_orden: str = "",
-    initial_min_factura: str = "",
 ) -> List[dict]:
     factura1 = safely_read_dbf(dbc_dir, "FACTURA1.DBF")
     factura2 = safely_read_dbf(dbc_dir, "FACTURA2.DBF")
@@ -376,17 +374,11 @@ def process_historical(
 
     processed_sales: List[dict] = []
     last_key = orden_sort_key(last_orden) if last_orden else -1
-    min_orden_key = orden_sort_key(initial_min_orden) if initial_min_orden else -1
-    min_factura_key = orden_sort_key(initial_min_factura) if initial_min_factura else -1
-    cutoff_by_months: datetime.date | None = None
-    if initial_max_months_back and int(initial_max_months_back) > 0:
-        cutoff_by_months = _months_ago(datetime.date.today(), int(initial_max_months_back))
-    cutoff_by_date: datetime.date | None = _parse_dbf_date(initial_since_date) if initial_since_date else None
-    cutoff_date: datetime.date | None = None
-    if cutoff_by_months and cutoff_by_date:
-        cutoff_date = max(cutoff_by_months, cutoff_by_date)
-    else:
-        cutoff_date = cutoff_by_date or cutoff_by_months
+    cutoff_date: datetime.date | None = (
+        _months_ago(datetime.date.today(), INITIAL_LOAD_MAX_MONTHS_BACK)
+        if last_key < 0 and INITIAL_LOAD_MAX_MONTHS_BACK > 0
+        else None
+    )
 
     for f1item in factura1:
         orden = str(f1item.get("ORDEN", "")).strip()
@@ -396,12 +388,6 @@ def process_historical(
         if last_key >= 0 and orden_sort_key(orden) <= last_key:
             continue
         if last_key < 0:
-            if min_orden_key >= 0 and orden_sort_key(orden) < min_orden_key:
-                continue
-            if min_factura_key >= 0:
-                factura = str(f1item.get("FACTURA", "")).strip()
-                if orden_sort_key(factura) < min_factura_key:
-                    continue
             if cutoff_date is not None:
                 fdate = _parse_dbf_date(f1item.get("FECHA"))
                 if fdate is not None and fdate < cutoff_date:
@@ -558,17 +544,10 @@ def _execute_single_sync(progress: Callable[[str, float], None] | None = None) -
             remote_lo or "",
             last or "(desde inicio)",
         )
-    init_months = int(s.get("initial_max_months_back") or 18)
-    init_since_date = str(s.get("initial_since_date") or "").strip()
-    init_min_orden = str(s.get("initial_min_orden") or "").strip()
-    init_min_factura = str(s.get("initial_min_factura") or "").strip()
     if not last:
         logging.info(
-            "Carga inicial: max_months_back=%s since_date=%r min_orden=%r min_factura=%r",
-            init_months,
-            init_since_date,
-            init_min_orden,
-            init_min_factura,
+            "Carga inicial sin checkpoint local/remoto: se limita automaticamente a los últimos %s meses.",
+            INITIAL_LOAD_MAX_MONTHS_BACK,
         )
     tarjetas_map = get_tarjetas_map(dbc)
     meseros_map = get_meseros_map(dbc)
@@ -577,16 +556,7 @@ def _execute_single_sync(progress: Callable[[str, float], None] | None = None) -
     turno_rows = process_turno_actual(dbc, tarjetas_map, meseros_map)
     if progress:
         progress("Procesando ventas históricas pendientes…", 18.0)
-    historical_sales = process_historical(
-        dbc,
-        tarjetas_map,
-        meseros_map,
-        last,
-        initial_max_months_back=init_months,
-        initial_since_date=init_since_date,
-        initial_min_orden=init_min_orden,
-        initial_min_factura=init_min_factura,
-    )
+    historical_sales = process_historical(dbc, tarjetas_map, meseros_map, last)
 
     if not historical_sales and not turno_rows:
         logging.info("Sin datos de turno ni histórico nuevo.")
