@@ -1,7 +1,7 @@
 import uuid
 import datetime
 import enum
-from sqlalchemy import Column, String, Integer, Float, Boolean, ForeignKey, DateTime, JSON
+from sqlalchemy import Column, String, Integer, Float, Boolean, ForeignKey, DateTime, JSON, UniqueConstraint
 from sqlalchemy.orm import relationship
 from .database import Base
 
@@ -155,6 +155,20 @@ class VentaTurno(Base):
     detalles = Column(JSON, default=list)
 
     sucursal = relationship("Sucursal", back_populates="ventas_turno")
+
+
+class MetodoPagoAlias(Base):
+    """Reglas Swiss Admin: alias tal como llega del POS → nombre unificado en dashboard."""
+
+    __tablename__ = "metodos_pago_alias"
+    __table_args__ = (UniqueConstraint("sucursal_id", "alias_norm", name="uq_metodo_pago_alias_suc_norm"),)
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    sucursal_id = Column(String, ForeignKey("sucursales.id", ondelete="CASCADE"), nullable=False, index=True)
+    alias = Column(String, nullable=False)
+    alias_norm = Column(String, nullable=False, index=True)
+    nombre_canonico = Column(String, nullable=False)
+
 
 class LogSync(Base):
     __tablename__ = "logs_sync"

@@ -15,7 +15,7 @@ import {
 import { Banknote, CalendarDays, CreditCard, LayoutDashboard, TrendingUp, Wallet } from 'lucide-react';
 import { format, parseISO } from 'date-fns';
 import { es } from 'date-fns/locale';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useDashboardShell } from '../../context/DashboardShellContext';
 import { KpiCard } from '../../components/dashboard/KpiCard';
 import { SectionCard } from '../../components/dashboard/SectionCard';
@@ -65,6 +65,7 @@ function TooltipOscuro({ active, payload, label }: { active?: boolean; payload?:
 }
 
 export default function ResumenPage() {
+  const navigate = useNavigate();
   const { data, loading } = useDashboardShell();
   const d = data;
 
@@ -218,12 +219,12 @@ export default function ResumenPage() {
           </div>
           <ul className="mt-2 space-y-1.5 text-sm">
             {pieMetodos.map((m, i) => (
-              <li key={m.name} className="flex items-center justify-between gap-2">
-                <span className="flex items-center gap-2 min-w-0 text-slate-600">
-                  <span className="h-2 w-2 rounded-full shrink-0" style={{ background: PIE_COLORS[i % PIE_COLORS.length] }} />
-                  <span className="truncate">{m.name}</span>
+              <li key={m.name} className="flex items-start justify-between gap-2">
+                <span className="flex items-start gap-2 min-w-0 text-slate-600">
+                  <span className="h-2 w-2 rounded-full shrink-0 mt-1.5" style={{ background: PIE_COLORS[i % PIE_COLORS.length] }} />
+                  <span className="break-words leading-snug">{m.name}</span>
                 </span>
-                <span className="font-mono font-semibold text-slate-900 shrink-0">{m.pct}%</span>
+                <span className="font-mono font-semibold text-slate-900 shrink-0 tabular-nums">{m.pct}%</span>
               </li>
             ))}
             {!pieMetodos.length && <li className="text-slate-500">Sin datos de medios de pago.</li>}
@@ -240,10 +241,17 @@ export default function ResumenPage() {
             </Link>
           }
         >
-          <p className="text-xs text-slate-500 mb-3">Suma de renglones por CLASE en tickets (cuando el POS la envía).</p>
+          <p className="text-xs text-slate-500 mb-3">
+            Suma de renglones por tipo (bebidas, alimentos, otros). Pulsa una barra para ver productos filtrados.
+          </p>
           <div className="space-y-3">
             {(d?.por_clase ?? []).slice(0, 6).map((c) => (
-              <div key={c.name}>
+              <button
+                key={c.clase_key}
+                type="button"
+                onClick={() => navigate(`/productos?clase=${c.clase_key}`)}
+                className="w-full text-left rounded-lg px-1 py-0.5 -mx-1 hover:bg-slate-50/80 focus:outline-none focus:ring-2 focus:ring-blue-500/40"
+              >
                 <div className="flex justify-between text-xs mb-1">
                   <span className="font-medium text-slate-700">{c.name}</span>
                   <span className="font-mono font-semibold text-slate-900">
@@ -256,7 +264,7 @@ export default function ResumenPage() {
                     style={{ width: `${Math.min(100, Math.round((c.total_renglon / maxClase) * 100))}%` }}
                   />
                 </div>
-              </div>
+              </button>
             ))}
             {!(d?.por_clase ?? []).length && <p className="text-sm text-slate-500">Sin desglose por clase en este periodo.</p>}
           </div>
@@ -274,8 +282,10 @@ export default function ResumenPage() {
             {topMeseros.map((m, i) => {
               const maxV = topMeseros[0]?.total_pagado || 1;
               const w = Math.round((m.total_pagado / maxV) * 100);
+              const sucLine = (m.sucursales ?? []).join(' · ');
+              const rowKey = `${m.nombre}-${(m.sucursales ?? []).join('/')}`;
               return (
-                <div key={m.codigo} className="flex items-center gap-3 py-2 border-b border-slate-100 last:border-0">
+                <div key={rowKey} className="flex items-center gap-3 py-2 border-b border-slate-100 last:border-0">
                   <span className="text-lg w-7 text-center shrink-0">{i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i + 1}.`}</span>
                   <div className="flex-1 min-w-0">
                     <div className="flex justify-between gap-2 text-sm">
@@ -284,6 +294,11 @@ export default function ResumenPage() {
                         {m.total_pagado.toLocaleString('es-MX', { style: 'currency', currency: 'MXN', maximumFractionDigits: 0 })}
                       </span>
                     </div>
+                    {sucLine ? (
+                      <p className="text-[11px] text-slate-500 truncate mt-0.5" title={sucLine}>
+                        {sucLine}
+                      </p>
+                    ) : null}
                     <div className="mt-1 h-1 rounded bg-slate-100 overflow-hidden">
                       <div className="h-full rounded bg-violet-500" style={{ width: `${w}%` }} />
                     </div>

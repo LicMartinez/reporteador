@@ -26,22 +26,27 @@ export default function MeserosPage() {
             <thead>
               <tr className="bg-slate-50 text-left text-slate-600 border-b border-slate-200">
                 <th className="px-4 py-3 font-semibold">Mesero</th>
-                <th className="px-4 py-3 font-semibold font-mono">Código</th>
+                <th className="px-4 py-3 font-semibold">Sucursal(es)</th>
                 <th className="px-4 py-3 font-semibold text-right">Tickets</th>
                 <th className="px-4 py-3 font-semibold text-right">Total vendido</th>
               </tr>
             </thead>
             <tbody>
-              {rows.map((r) => (
-                <tr key={r.codigo} className="border-b border-slate-100 hover:bg-slate-50/80">
-                  <td className="px-4 py-3 font-medium text-slate-900">{r.nombre}</td>
-                  <td className="px-4 py-3 font-mono text-slate-600">{r.codigo}</td>
-                  <td className="px-4 py-3 text-right tabular-nums">{r.num_tickets.toLocaleString('es-MX')}</td>
-                  <td className="px-4 py-3 text-right tabular-nums font-medium">
-                    ${r.total_pagado.toLocaleString('es-MX')}
-                  </td>
-                </tr>
-              ))}
+              {rows.map((r) => {
+                const key = `${r.nombre}-${(r.sucursales ?? []).join('/')}`;
+                return (
+                  <tr key={key} className="border-b border-slate-100 hover:bg-slate-50/80">
+                    <td className="px-4 py-3 font-medium text-slate-900 align-top">{r.nombre}</td>
+                    <td className="px-4 py-3 text-slate-700 align-top break-words max-w-[14rem]">
+                      {(r.sucursales ?? []).length ? r.sucursales.join(' / ') : '—'}
+                    </td>
+                    <td className="px-4 py-3 text-right tabular-nums align-top">{r.num_tickets.toLocaleString('es-MX')}</td>
+                    <td className="px-4 py-3 text-right tabular-nums font-medium align-top">
+                      ${r.total_pagado.toLocaleString('es-MX')}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>

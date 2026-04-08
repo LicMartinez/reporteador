@@ -55,7 +55,7 @@ export function KpiCard({
         <div className="min-w-0">
           <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500 mb-1">{title}</p>
           <h3
-            className={`text-2xl sm:text-[1.65rem] font-extrabold text-slate-900 tabular-nums leading-tight truncate ${
+            className={`text-xl sm:text-2xl xl:text-[1.65rem] font-extrabold text-slate-900 tabular-nums leading-snug break-words whitespace-normal hyphens-none ${
               monoValue || (!integer && prefix) ? 'font-mono' : ''
             }`}
           >

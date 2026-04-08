@@ -1,4 +1,5 @@
 import os
+import uuid
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, List, Optional
@@ -23,6 +24,12 @@ from . import schemas
 from .deps import get_current_user, get_current_user_dashboard, verify_sync_api_key
 
 logger = logging.getLogger(__name__)
+
+
+def _norm_metodo_alias_text(s: str) -> str:
+    """Normaliza etiqueta de método de pago para reglas y lookup (mayúsculas, espacios colapsados)."""
+    return " ".join(str(s).strip().upper().split())
+
 
 _origins = os.environ.get("ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")
 ALLOWED_ORIGINS = [o.strip() for o in _origins.split(",") if o.strip()]
@@ -765,6 +772,108 @@ def swiss_admin_update_catalogo(
     )
 
 
+@app.get("/swiss-admin/metodos-pago-alias", response_model=List[schemas.MetodoPagoAliasBrief], tags=["SwissAdmin"])
+def swiss_list_metodos_pago_alias(
+    sucursal_id: Optional[str] = None,
+    requester: models.Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _require_admin(requester)
+    q = db.query(models.MetodoPagoAlias).order_by(
+        models.MetodoPagoAlias.sucursal_id, models.MetodoPagoAlias.alias_norm
+    )
+    if sucursal_id and sucursal_id.strip():
+        q = q.filter(models.MetodoPagoAlias.sucursal_id == sucursal_id.strip())
+    return q.all()
+
+
+@app.post("/swiss-admin/metodos-pago-alias", response_model=schemas.MetodoPagoAliasBrief, tags=["SwissAdmin"])
+def swiss_create_metodo_pago_alias(
+    body: schemas.MetodoPagoAliasCreateRequest,
+    requester: models.Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _require_admin(requester)
+    suc = db.query(models.Sucursal).filter(models.Sucursal.id == body.sucursal_id.strip()).first()
+    if not suc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Sucursal no registrada")
+    alias_norm = _norm_metodo_alias_text(body.alias)
+    if not alias_norm:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Alias inválido")
+    dup = (
+        db.query(models.MetodoPagoAlias)
+        .filter(
+            models.MetodoPagoAlias.sucursal_id == suc.id,
+            models.MetodoPagoAlias.alias_norm == alias_norm,
+        )
+        .first()
+    )
+    if dup:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Ya existe una regla con ese alias en la sucursal")
+    row = models.MetodoPagoAlias(
+        id=str(uuid.uuid4()),
+        sucursal_id=suc.id,
+        alias=body.alias.strip(),
+        alias_norm=alias_norm,
+        nombre_canonico=body.nombre_canonico.strip(),
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+@app.patch("/swiss-admin/metodos-pago-alias/{rule_id}", response_model=schemas.MetodoPagoAliasBrief, tags=["SwissAdmin"])
+def swiss_update_metodo_pago_alias(
+    rule_id: str,
+    body: schemas.MetodoPagoAliasUpdateRequest,
+    requester: models.Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _require_admin(requester)
+    row = db.query(models.MetodoPagoAlias).filter(models.MetodoPagoAlias.id == rule_id).first()
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Regla no encontrada")
+    data = body.model_dump(exclude_unset=True)
+    if "alias" in data:
+        alias_norm = _norm_metodo_alias_text(data["alias"])
+        if not alias_norm:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Alias inválido")
+        dup = (
+            db.query(models.MetodoPagoAlias)
+            .filter(
+                models.MetodoPagoAlias.sucursal_id == row.sucursal_id,
+                models.MetodoPagoAlias.alias_norm == alias_norm,
+                models.MetodoPagoAlias.id != row.id,
+            )
+            .first()
+        )
+        if dup:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Ya existe esa regla en la sucursal")
+        row.alias = data["alias"].strip()
+        row.alias_norm = alias_norm
+    if "nombre_canonico" in data:
+        row.nombre_canonico = data["nombre_canonico"].strip()
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+@app.delete("/swiss-admin/metodos-pago-alias/{rule_id}", tags=["SwissAdmin"])
+def swiss_delete_metodo_pago_alias(
+    rule_id: str,
+    requester: models.Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _require_admin(requester)
+    row = db.query(models.MetodoPagoAlias).filter(models.MetodoPagoAlias.id == rule_id).first()
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Regla no encontrada")
+    db.delete(row)
+    db.commit()
+    return {"status": "ok"}
+
+
 @app.get("/swiss-admin/config/admin-users", response_model=List[schemas.SwissAdminUserBrief], tags=["SwissAdmin"])
 def swiss_admin_list_portal_admins(
     requester: models.Usuario = Depends(get_current_user),
@@ -1119,32 +1228,72 @@ def _pct_delta(cur: float, prev: float) -> Optional[float]:
     return round(((cur - prev) / prev) * 100, 2)
 
 
+def _dashboard_sucursales_filtro_ids(
+    db: Session,
+    user: models.Usuario,
+    sucursal_id: Optional[str],
+    sucursal_ids: Optional[List[str]],
+) -> Optional[List[str]]:
+    """
+    None = admin sin filtro (todas las sucursales).
+    [] = visor sin sucursales asignadas (sin datos).
+    [id, ...] = restringir a esas sucursales (validadas).
+    """
+    req: List[str] = []
+    if sucursal_ids:
+        req = [x.strip() for x in sucursal_ids if x and str(x).strip()]
+    elif sucursal_id and sucursal_id.strip():
+        req = [sucursal_id.strip()]
+
+    if user.is_admin:
+        if not req:
+            return None
+        rows = db.query(models.Sucursal.id).filter(models.Sucursal.id.in_(req)).all()
+        found = {r[0] for r in rows}
+        missing = [x for x in req if x not in found]
+        if missing:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Sucursales no registradas: {missing}",
+            )
+        return req
+
+    allowed = [
+        row.sucursal_id
+        for row in db.query(models.UsuarioSucursal)
+        .filter(models.UsuarioSucursal.usuario_id == user.id)
+        .all()
+    ]
+    if not allowed:
+        return []
+    if not req:
+        return allowed
+    allowed_set = set(allowed)
+    for x in req:
+        if x not in allowed_set:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Sin acceso a la sucursal indicada.",
+            )
+    return req
+
+
 def _ventas_en_rango(
     db: Session,
     user: models.Usuario,
     fecha_desde: str,
     fecha_hasta: str,
-    sucursal_id: Optional[str],
+    sucursales_filtro: Optional[List[str]],
 ) -> List[models.Venta]:
     q = db.query(models.Venta).join(models.Sucursal, models.Venta.sucursal_id == models.Sucursal.id)
 
-    if not user.is_admin:
-        allowed_ids = [
-            row.sucursal_id
-            for row in db.query(models.UsuarioSucursal)
-            .filter(models.UsuarioSucursal.usuario_id == user.id)
-            .all()
-        ]
-        if not allowed_ids:
-            return []
-        q = q.filter(models.Venta.sucursal_id.in_(allowed_ids))
-
-    if sucursal_id:
-        q = q.filter(models.Venta.sucursal_id == sucursal_id)
+    if sucursales_filtro is not None:
+        q = q.filter(models.Venta.sucursal_id.in_(sucursales_filtro))
 
     q = q.filter(models.Venta.fecha >= fecha_desde, models.Venta.fecha <= fecha_hasta)
     q = q.options(
         load_only(
+            models.Venta.sucursal_id,
             models.Venta.orden,
             models.Venta.fecha,
             models.Venta.hora,
@@ -1167,27 +1316,17 @@ def _ventas_turno_en_rango(
     user: models.Usuario,
     fecha_desde: str,
     fecha_hasta: str,
-    sucursal_id: Optional[str],
+    sucursales_filtro: Optional[List[str]],
 ) -> List[models.VentaTurno]:
     q = db.query(models.VentaTurno).join(models.Sucursal, models.VentaTurno.sucursal_id == models.Sucursal.id)
 
-    if not user.is_admin:
-        allowed_ids = [
-            row.sucursal_id
-            for row in db.query(models.UsuarioSucursal)
-            .filter(models.UsuarioSucursal.usuario_id == user.id)
-            .all()
-        ]
-        if not allowed_ids:
-            return []
-        q = q.filter(models.VentaTurno.sucursal_id.in_(allowed_ids))
-
-    if sucursal_id:
-        q = q.filter(models.VentaTurno.sucursal_id == sucursal_id)
+    if sucursales_filtro is not None:
+        q = q.filter(models.VentaTurno.sucursal_id.in_(sucursales_filtro))
 
     q = q.filter(models.VentaTurno.fecha >= fecha_desde, models.VentaTurno.fecha <= fecha_hasta)
     q = q.options(
         load_only(
+            models.VentaTurno.sucursal_id,
             models.VentaTurno.orden,
             models.VentaTurno.fecha,
             models.VentaTurno.hora,
@@ -1210,16 +1349,16 @@ def _ventas_merged_para_resumen(
     user: models.Usuario,
     fecha_desde: str,
     fecha_hasta: str,
-    sucursal_id: Optional[str],
+    sucursales_filtro: Optional[List[str]],
 ) -> List[Any]:
     """Histórico + turno en curso, sin duplicar ORDEN ya cerrado en histórico."""
-    hist = _ventas_en_rango(db, user, fecha_desde, fecha_hasta, sucursal_id)
+    hist = _ventas_en_rango(db, user, fecha_desde, fecha_hasta, sucursales_filtro)
     ordenes_hist: set[str] = set()
     for v in hist:
         o = (v.orden or "").strip()
         if o:
             ordenes_hist.add(o)
-    turno = _ventas_turno_en_rango(db, user, fecha_desde, fecha_hasta, sucursal_id)
+    turno = _ventas_turno_en_rango(db, user, fecha_desde, fecha_hasta, sucursales_filtro)
     turno_filtrado = [t for t in turno if (t.orden or "").strip() not in ordenes_hist]
     return list(hist) + list(turno_filtrado)
 
@@ -1251,7 +1390,25 @@ def _montos_efectivo_tarjeta_row(v: Any) -> tuple[float, float]:
     return float(v.monto_efectivo or 0), float(v.monto_tarjeta or 0)
 
 
-def _acumular_pagos_en_map(v: Any, metodo_map: dict[str, float]) -> None:
+def _metodo_pago_normalizar_clave(name: str) -> str:
+    return _norm_metodo_alias_text(name)
+
+
+def _acumular_pagos_en_map(
+    v: Any,
+    metodo_map: dict[str, float],
+    metodo_alias_lookup: Optional[dict[tuple[str, str], str]] = None,
+) -> None:
+    sid = str(getattr(v, "sucursal_id", "") or "")
+
+    def _canon(raw_label: str) -> str:
+        s = (raw_label or "").strip() or "Otro"
+        if metodo_alias_lookup and sid:
+            hit = metodo_alias_lookup.get((sid, _metodo_pago_normalizar_clave(s)))
+            if hit:
+                return hit
+        return s
+
     pagos = getattr(v, "pagos", None) or []
     if pagos and isinstance(pagos, list):
         for p in pagos:
@@ -1260,12 +1417,12 @@ def _acumular_pagos_en_map(v: Any, metodo_map: dict[str, float]) -> None:
             amt = float(p.get("amount") or 0)
             if amt <= 0:
                 continue
-            name = (str(p.get("name") or "Otro")).strip() or "Otro"
+            name = _canon(str(p.get("name") or "Otro"))
             metodo_map[name] += amt
         return
-    label = (getattr(v, "metodo_pago_tarjeta", None) or "N/A").strip() or "N/A"
+    label = _canon((getattr(v, "metodo_pago_tarjeta", None) or "N/A").strip() or "N/A")
     metodo_map[label] += float(v.monto_tarjeta or 0)
-    metodo_map["Efectivo"] += float(v.monto_efectivo or 0)
+    metodo_map[_canon("Efectivo")] += float(v.monto_efectivo or 0)
 
 
 def _detalle_line_costo(item: dict) -> float:
@@ -1331,7 +1488,12 @@ def _estimar_comisiones_tarjetas(metodo_map: dict[str, float]) -> dict[str, Any]
     }
 
 
-def _resumen_from_ventas(ventas: List[Any]) -> dict[str, Any]:
+def _resumen_from_ventas(
+    ventas: List[Any],
+    *,
+    sucursal_nombres_por_id: dict[str, str],
+    metodo_alias_lookup: Optional[dict[tuple[str, str], str]] = None,
+) -> dict[str, Any]:
     empty = {
         "total_ingresos": 0.0,
         "num_tickets": 0,
@@ -1400,7 +1562,7 @@ def _resumen_from_ventas(ventas: List[Any]) -> dict[str, Any]:
 
     metodo_map: dict[str, float] = defaultdict(float)
     for v in ventas:
-        _acumular_pagos_en_map(v, metodo_map)
+        _acumular_pagos_en_map(v, metodo_map, metodo_alias_lookup)
 
     comisiones_info = _estimar_comisiones_tarjetas(dict(metodo_map))
     resumen_financiero = {
@@ -1470,7 +1632,18 @@ def _resumen_from_ventas(ventas: List[Any]) -> dict[str, Any]:
 
     prod_acc: dict[str, dict[str, Any]] = {}
     clase_acc: dict[int, dict[str, Any]] = {}
-    clase_nombres = {1: "Artículos (CLASE 1)", 2: "Alimentos (CLASE 2)"}
+    clase_bucket_meta = {
+        1: {"name": "BEBIDAS", "clase_key": 1},
+        2: {"name": "ALIMENTOS", "clase_key": 2},
+        3: {"name": "OTROS ARTICULOS", "clase_key": 3},
+    }
+
+    def _clase_bucket(clase_i: int) -> int:
+        if clase_i == 1:
+            return 1
+        if clase_i == 2:
+            return 2
+        return 3
 
     for v in ventas:
         for item in v.detalles or []:
@@ -1483,6 +1656,13 @@ def _resumen_from_ventas(ventas: List[Any]) -> dict[str, Any]:
             tr = float(item.get("total_renglon") or 0)
             cant = float(item.get("cantidad") or 0)
             c_line = _detalle_line_costo(item)
+            clase_raw = item.get("clase")
+            try:
+                clase_i = int(clase_raw) if clase_raw is not None and str(clase_raw).strip() != "" else 0
+            except (TypeError, ValueError):
+                clase_i = 0
+            bucket = _clase_bucket(clase_i)
+
             if key not in prod_acc:
                 prod_acc[key] = {
                     "nombre": nombre,
@@ -1490,21 +1670,23 @@ def _resumen_from_ventas(ventas: List[Any]) -> dict[str, Any]:
                     "total_renglon": 0.0,
                     "total_costo": 0.0,
                     "cantidad": 0.0,
+                    "por_clase_tr": defaultdict(float),
                 }
             prod_acc[key]["total_renglon"] += tr
             prod_acc[key]["total_costo"] += c_line
             prod_acc[key]["cantidad"] += cant
+            prod_acc[key]["por_clase_tr"][bucket] += tr
 
-            clase_raw = item.get("clase")
-            try:
-                clase_i = int(clase_raw) if clase_raw is not None and str(clase_raw).strip() != "" else 0
-            except (TypeError, ValueError):
-                clase_i = 0
-            if clase_i in (1, 2):
-                if clase_i not in clase_acc:
-                    clase_acc[clase_i] = {"name": clase_nombres[clase_i], "total_renglon": 0.0, "cantidad": 0.0}
-                clase_acc[clase_i]["total_renglon"] += tr
-                clase_acc[clase_i]["cantidad"] += cant
+            if bucket not in clase_acc:
+                meta = clase_bucket_meta[bucket]
+                clase_acc[bucket] = {
+                    "name": meta["name"],
+                    "clase_key": meta["clase_key"],
+                    "total_renglon": 0.0,
+                    "cantidad": 0.0,
+                }
+            clase_acc[bucket]["total_renglon"] += tr
+            clase_acc[bucket]["cantidad"] += cant
 
     top_sorted = sorted(prod_acc.values(), key=lambda x: -x["total_renglon"])[:20]
     top_productos = []
@@ -1514,10 +1696,15 @@ def _resumen_from_ventas(ventas: List[Any]) -> dict[str, Any]:
         m_pct = None
         if trn > 0 and tc > 0:
             m_pct = round((1.0 - tc / trn) * 100, 1)
+        pct: dict[int, float] = dict(p.get("por_clase_tr") or {})
+        dom_clase = 3
+        if pct:
+            dom_clase = max(pct.keys(), key=lambda k: pct[k])
         top_productos.append(
             {
                 "nombre": p["nombre"],
                 "codigo": p["codigo"],
+                "clase": dom_clase,
                 "total_renglon": round(trn, 2),
                 "total_costo": round(tc, 2),
                 "margen_pct": m_pct,
@@ -1532,21 +1719,33 @@ def _resumen_from_ventas(ventas: List[Any]) -> dict[str, Any]:
             continue
         nom = (getattr(v, "mesero_nombre", None) or "").strip() or cod
         tip = float(getattr(v, "propinas", None) or 0)
+        sid_v = str(getattr(v, "sucursal_id", "") or "")
+        suc_nom = sucursal_nombres_por_id.get(sid_v) or sid_v or "—"
         if cod not in mesero_acc:
-            mesero_acc[cod] = {"codigo": cod, "nombre": nom, "total_pagado": 0.0, "num_tickets": 0, "propinas": 0.0}
+            mesero_acc[cod] = {
+                "codigo": cod,
+                "nombre": nom,
+                "total_pagado": 0.0,
+                "num_tickets": 0,
+                "propinas": 0.0,
+                "sucursales": set(),
+            }
         mesero_acc[cod]["total_pagado"] += float(v.total_pagado or 0)
         mesero_acc[cod]["num_tickets"] += 1
         mesero_acc[cod]["propinas"] += tip
+        if suc_nom:
+            mesero_acc[cod]["sucursales"].add(suc_nom)
 
     por_mesero = sorted(mesero_acc.values(), key=lambda x: -x["total_pagado"])[:30]
     por_mesero_out: list[dict[str, Any]] = []
     for m in por_mesero:
         tp = m["total_pagado"]
         nt = m["num_tickets"]
+        suc_list = sorted(m.get("sucursales") or [])
         por_mesero_out.append(
             {
-                "codigo": m["codigo"],
                 "nombre": m["nombre"],
+                "sucursales": suc_list,
                 "total_pagado": round(tp, 2),
                 "num_tickets": nt,
                 "propinas": round(m["propinas"], 2),
@@ -1558,6 +1757,7 @@ def _resumen_from_ventas(ventas: List[Any]) -> dict[str, Any]:
         [
             {
                 "name": clase_acc[k]["name"],
+                "clase_key": clase_acc[k]["clase_key"],
                 "total_renglon": round(clase_acc[k]["total_renglon"], 2),
                 "cantidad": round(clase_acc[k]["cantidad"], 3),
             }
@@ -1589,26 +1789,57 @@ def _resumen_from_ventas(ventas: List[Any]) -> dict[str, Any]:
     }
 
 
+def _dashboard_sucursal_nombres_from_ventas(db: Session, ventas: List[Any]) -> dict[str, str]:
+    ids_set = {str(getattr(v, "sucursal_id", "") or "") for v in ventas if getattr(v, "sucursal_id", None)}
+    ids_set.discard("")
+    if not ids_set:
+        return {}
+    rows = db.query(models.Sucursal.id, models.Sucursal.nombre).filter(models.Sucursal.id.in_(ids_set)).all()
+    return {str(r[0]): r[1] for r in rows}
+
+
+def _dashboard_metodo_alias_lookup_map(db: Session) -> Optional[dict[tuple[str, str], str]]:
+    rows = db.query(models.MetodoPagoAlias).all()
+    if not rows:
+        return None
+    return {(str(a.sucursal_id), str(a.alias_norm)): a.nombre_canonico for a in rows}
+
+
 @app.get("/dashboard/resumen", tags=["Dashboard"])
 def dashboard_resumen(
     fecha_desde: str,
     fecha_hasta: str,
     sucursal_id: Optional[str] = None,
+    sucursal_ids: Optional[List[str]] = Query(None),
     include_previous: bool = False,
     user: models.Usuario = Depends(get_current_user_dashboard),
     db: Session = Depends(get_db),
 ):
     """
     KPIs y series para el dashboard. Admin ve todas las sucursales; visor solo las asignadas en usuario_sucursales.
-    Incluye por_dia, top_productos (desde detalles JSON) y deltas opcionales vs el periodo anterior de igual duración.
+    `sucursal_ids` repetido en query filtra a varias sucursales; sin parámetro = todas las permitidas.
+    `sucursal_id` (legacy) equivale a una sola sucursal si no hay `sucursal_ids`.
     """
-    ventas = _ventas_merged_para_resumen(db, user, fecha_desde, fecha_hasta, sucursal_id)
-    out = _resumen_from_ventas(ventas)
+    filtro = _dashboard_sucursales_filtro_ids(db, user, sucursal_id, sucursal_ids)
+    if filtro is not None and len(filtro) == 0:
+        ventas: List[Any] = []
+    else:
+        ventas = _ventas_merged_para_resumen(db, user, fecha_desde, fecha_hasta, filtro)
+
+    suc_map = _dashboard_sucursal_nombres_from_ventas(db, ventas)
+    metodo_lu = _dashboard_metodo_alias_lookup_map(db)
+    out = _resumen_from_ventas(ventas, sucursal_nombres_por_id=suc_map, metodo_alias_lookup=metodo_lu)
 
     if include_previous:
         pd, ph = _prev_period_dates(fecha_desde, fecha_hasta)
-        prev_ventas = _ventas_merged_para_resumen(db, user, pd, ph, sucursal_id)
-        prev = _resumen_from_ventas(prev_ventas)
+        if filtro is not None and len(filtro) == 0:
+            prev_ventas: List[Any] = []
+        else:
+            prev_ventas = _ventas_merged_para_resumen(db, user, pd, ph, filtro)
+        prev_suc = _dashboard_sucursal_nombres_from_ventas(db, prev_ventas)
+        prev = _resumen_from_ventas(
+            prev_ventas, sucursal_nombres_por_id=prev_suc, metodo_alias_lookup=metodo_lu
+        )
         out["deltas"] = {
             "total_ingresos_pct": _pct_delta(out["total_ingresos"], prev["total_ingresos"]),
             "num_tickets_pct": _pct_delta(float(out["num_tickets"]), float(prev["num_tickets"])),

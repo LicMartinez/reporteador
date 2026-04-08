@@ -51,7 +51,9 @@ export type ResumenPorDia = {
 
 export type ResumenTopProducto = {
   nombre: string;
-  codigo: string | null;
+  codigo?: string | null;
+  /** 1=BEBIDAS, 2=ALIMENTOS, 3=OTROS (según renglón dominante). */
+  clase?: number;
   total_renglon: number;
   cantidad: number;
   total_costo?: number;
@@ -68,8 +70,8 @@ export type ResumenDeltas = {
 };
 
 export type ResumenMesero = {
-  codigo: string;
   nombre: string;
+  sucursales: string[];
   total_pagado: number;
   num_tickets: number;
   propinas?: number;
@@ -78,6 +80,7 @@ export type ResumenMesero = {
 
 export type ResumenClase = {
   name: string;
+  clase_key: number;
   total_renglon: number;
   cantidad: number;
 };
@@ -310,6 +313,41 @@ export async function updateSwissCatalogo(catalogo_id: string, body: {
   return data;
 }
 
+export type MetodoPagoAliasBrief = {
+  id: string;
+  sucursal_id: string;
+  alias: string;
+  nombre_canonico: string;
+};
+
+export async function fetchSwissMetodosPagoAlias(sucursal_id?: string) {
+  const { data } = await api.get<MetodoPagoAliasBrief[]>('/swiss-admin/metodos-pago-alias', {
+    params: sucursal_id ? { sucursal_id } : {},
+  });
+  return data;
+}
+
+export async function createSwissMetodoPagoAlias(body: {
+  sucursal_id: string;
+  alias: string;
+  nombre_canonico: string;
+}) {
+  const { data } = await api.post<MetodoPagoAliasBrief>('/swiss-admin/metodos-pago-alias', body);
+  return data;
+}
+
+export async function patchSwissMetodoPagoAlias(
+  rule_id: string,
+  body: { alias?: string; nombre_canonico?: string }
+) {
+  const { data } = await api.patch<MetodoPagoAliasBrief>(`/swiss-admin/metodos-pago-alias/${rule_id}`, body);
+  return data;
+}
+
+export async function deleteSwissMetodoPagoAlias(rule_id: string) {
+  await api.delete(`/swiss-admin/metodos-pago-alias/${rule_id}`);
+}
+
 export async function fetchSwissPortalAdmins() {
   const { data } = await api.get<SwissAdminUserBrief[]>('/swiss-admin/config/admin-users');
   return data;
@@ -351,17 +389,19 @@ export async function fetchMe() {
 export async function fetchResumen(
   fechaDesde: string,
   fechaHasta: string,
-  sucursalId?: string,
+  sucursalIds?: string[] | undefined,
   opts?: { includePrevious?: boolean }
 ) {
-  const { data } = await api.get<Resumen>('/dashboard/resumen', {
-    params: {
-      fecha_desde: fechaDesde,
-      fecha_hasta: fechaHasta,
-      sucursal_id: sucursalId || undefined,
-      include_previous: opts?.includePrevious ? true : undefined,
-    },
-  });
+  const sp = new URLSearchParams();
+  sp.set('fecha_desde', fechaDesde);
+  sp.set('fecha_hasta', fechaHasta);
+  if (opts?.includePrevious) sp.set('include_previous', 'true');
+  if (sucursalIds && sucursalIds.length > 0) {
+    for (const id of sucursalIds) {
+      if (id) sp.append('sucursal_ids', id);
+    }
+  }
+  const { data } = await api.get<Resumen>(`/dashboard/resumen?${sp.toString()}`);
   return data;
 }
 

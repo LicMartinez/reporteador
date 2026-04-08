@@ -186,3 +186,24 @@ class SwissUpdatePortalAdminRequest(BaseModel):
 class ChangePasswordRequest(BaseModel):
     old_password: str = Field(min_length=1, max_length=256)
     new_password: str = Field(min_length=6, max_length=256)
+
+
+class MetodoPagoAliasBrief(BaseModel):
+    id: str
+    sucursal_id: str
+    alias: str
+    nombre_canonico: str
+
+    class Config:
+        from_attributes = True
+
+
+class MetodoPagoAliasCreateRequest(BaseModel):
+    sucursal_id: str = Field(min_length=1)
+    alias: str = Field(min_length=1, max_length=256)
+    nombre_canonico: str = Field(min_length=1, max_length=256)
+
+
+class MetodoPagoAliasUpdateRequest(BaseModel):
+    alias: Optional[str] = Field(None, min_length=1, max_length=256)
+    nombre_canonico: Optional[str] = Field(None, min_length=1, max_length=256)

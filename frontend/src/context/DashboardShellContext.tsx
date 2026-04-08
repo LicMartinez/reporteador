@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from 'react';
@@ -60,6 +61,12 @@ function normalizeResumen(raw: Resumen | null): Resumen | null {
   };
 }
 
+function sameSet(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  const sa = new Set(a);
+  return b.every((x) => sa.has(x));
+}
+
 export type DashboardShellValue = {
   preset: DatePreset;
   setPreset: (p: DatePreset) => void;
@@ -69,8 +76,10 @@ export type DashboardShellValue = {
   setCustomHasta: (s: string) => void;
   fechaDesde: string;
   fechaHasta: string;
-  sucursalId: string;
-  setSucursalId: (s: string) => void;
+  selectedSucursalIds: string[];
+  setSelectedSucursalIds: (ids: string[] | ((prev: string[]) => string[])) => void;
+  toggleSucursalId: (id: string) => void;
+  selectAllSucursales: () => void;
   sucursales: { id: string; nombre: string }[];
   data: Resumen | null;
   loading: boolean;
@@ -84,26 +93,68 @@ export function DashboardShellProvider({ children }: { children: ReactNode }) {
   const [preset, setPreset] = useState<DatePreset>('hoy');
   const [customDesde, setCustomDesde] = useState(() => format(subDays(new Date(), 6), 'yyyy-MM-dd'));
   const [customHasta, setCustomHasta] = useState(() => format(new Date(), 'yyyy-MM-dd'));
-  const [sucursalId, setSucursalId] = useState('');
+  const [selectedSucursalIds, setSelectedSucursalIds] = useState<string[]>([]);
   const [sucursales, setSucursales] = useState<{ id: string; nombre: string }[]>([]);
   const [data, setData] = useState<Resumen | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+
+  const selectedRef = useRef(selectedSucursalIds);
+  selectedRef.current = selectedSucursalIds;
+  const prevAllowedSucursalIdsRef = useRef<string[]>([]);
 
   const { fechaDesde, fechaHasta } = useMemo(
     () => computeRange(preset, customDesde, customHasta),
     [preset, customDesde, customHasta]
   );
 
+  const toggleSucursalId = useCallback((id: string) => {
+    setSelectedSucursalIds((prev) => {
+      if (prev.includes(id)) {
+        const next = prev.filter((x) => x !== id);
+        return next.length === 0 ? prev : next;
+      }
+      return [...prev, id];
+    });
+  }, []);
+
+  const selectAllSucursales = useCallback(() => {
+    setSelectedSucursalIds(sucursales.map((s) => s.id));
+  }, [sucursales]);
+
   const reload = useCallback(async () => {
     setLoading(true);
     setErr(null);
     try {
-      const [sucs, res] = await Promise.all([
-        fetchSucursalesFilter(),
-        fetchResumen(fechaDesde, fechaHasta, sucursalId || undefined, { includePrevious: true }),
-      ]);
+      const sucs = await fetchSucursalesFilter();
+      const allowedIds = sucs.map((s) => s.id);
       setSucursales(sucs);
+
+      const prev = selectedRef.current;
+      const prevAllowed = prevAllowedSucursalIdsRef.current;
+      const firstSucursalesLoad = prevAllowed.length === 0;
+
+      let next = prev.filter((id) => allowedIds.includes(id));
+      if (next.length === 0 && allowedIds.length > 0) {
+        next = [...allowedIds];
+      } else if (!firstSucursalesLoad) {
+        const newlyAdded = allowedIds.filter((id) => !prevAllowed.includes(id));
+        for (const id of newlyAdded) {
+          if (!next.includes(id)) next.push(id);
+        }
+      }
+      prevAllowedSucursalIdsRef.current = [...allowedIds];
+      if (!sameSet(next, prev)) {
+        setSelectedSucursalIds(next);
+      }
+
+      const allSelected =
+        allowedIds.length > 0 &&
+        next.length === allowedIds.length &&
+        allowedIds.every((id) => next.includes(id));
+      const res = await fetchResumen(fechaDesde, fechaHasta, allSelected ? undefined : next, {
+        includePrevious: true,
+      });
       setData(normalizeResumen(res));
     } catch {
       setErr('No se pudieron cargar los datos. Revisa la API y el token.');
@@ -111,7 +162,7 @@ export function DashboardShellProvider({ children }: { children: ReactNode }) {
     } finally {
       setLoading(false);
     }
-  }, [fechaDesde, fechaHasta, sucursalId]);
+  }, [fechaDesde, fechaHasta, selectedSucursalIds]);
 
   useEffect(() => {
     reload();
@@ -127,8 +178,10 @@ export function DashboardShellProvider({ children }: { children: ReactNode }) {
       setCustomHasta,
       fechaDesde,
       fechaHasta,
-      sucursalId,
-      setSucursalId,
+      selectedSucursalIds,
+      setSelectedSucursalIds,
+      toggleSucursalId,
+      selectAllSucursales,
       sucursales,
       data,
       loading,
@@ -141,7 +194,9 @@ export function DashboardShellProvider({ children }: { children: ReactNode }) {
       customHasta,
       fechaDesde,
       fechaHasta,
-      sucursalId,
+      selectedSucursalIds,
+      toggleSucursalId,
+      selectAllSucursales,
       sucursales,
       data,
       loading,

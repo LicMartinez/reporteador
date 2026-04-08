@@ -49,11 +49,19 @@ export default function PagosPage() {
               </PieChart>
             </ResponsiveContainer>
           </div>
-          <ul className="mt-4 flex flex-wrap gap-2 justify-center">
+          <ul className="mt-4 flex flex-col sm:flex-row sm:flex-wrap gap-2 sm:justify-center">
             {chartMetodo.map((m, i) => (
-              <li key={m.name} className="text-xs flex items-center gap-1.5 text-slate-600">
-                <span className="w-2 h-2 rounded-full" style={{ backgroundColor: COLORS[i % COLORS.length] }} />
-                {m.name}: ${Number(m.amount).toLocaleString('es-MX')}
+              <li
+                key={m.name}
+                className="text-xs flex flex-col sm:flex-row sm:items-baseline gap-0.5 sm:gap-1.5 text-slate-600 min-w-0 sm:max-w-[min(100%,14rem)]"
+              >
+                <span className="flex items-center gap-1.5 min-w-0">
+                  <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: COLORS[i % COLORS.length] }} />
+                  <span className="font-medium break-words">{m.name}</span>
+                </span>
+                <span className="font-mono font-semibold text-slate-800 pl-3.5 sm:pl-0 shrink-0">
+                  ${Number(m.amount).toLocaleString('es-MX')}
+                </span>
               </li>
             ))}
           </ul>
