@@ -47,7 +47,9 @@ export function DashboardSidebar({
 
       <div className="p-4 mx-4 mt-4 rounded-xl bg-slate-800/50 border border-slate-700/50">
         <p className="font-semibold text-sm text-white truncate">{user?.nombre || user?.email}</p>
-        <p className="text-xs text-slate-400 mt-1">{user?.is_admin ? 'Administrador' : 'Visor'}</p>
+        <p className="text-xs text-slate-400 mt-1">
+          {user?.is_admin && !user?.portal_admin ? 'Administrador' : 'Visor'}
+        </p>
       </div>
 
       <nav className="flex flex-col gap-1 p-4 flex-1">

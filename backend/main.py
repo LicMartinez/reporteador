@@ -4,7 +4,9 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, List, Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
+import io
+
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from sqlalchemy.orm import Session, load_only
@@ -19,6 +21,7 @@ import logging
 from .database import Base, engine, get_db, ensure_schema_columns
 from . import models
 from .etl_matcher import ETLMatcher
+from . import swiss_import_layout
 from .auth_core import create_access_token, verify_password, hash_password
 from . import schemas
 from .deps import get_current_user, get_current_user_dashboard, verify_sync_api_key
@@ -769,6 +772,164 @@ def swiss_admin_update_catalogo(
         nombre=catalog.nombre,
         sucursal_ids=suc_ids,
         productos_count=prod_count,
+    )
+
+
+@app.get("/swiss-admin/catalogos/plantilla-productos.xlsx", tags=["SwissAdmin"])
+def swiss_catalog_product_template_xlsx(
+    requester: models.Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    sucursal_ids: Optional[List[str]] = Query(None),
+):
+    """Plantilla Excel: col A maestro; pares CODIGO/DESCRIPCION por sucursal (fila 1 nombres, fila 2 subtítulos)."""
+    _require_admin(requester)
+    q = db.query(models.Sucursal).order_by(models.Sucursal.nombre)
+    ids = [x.strip() for x in (sucursal_ids or []) if x and str(x).strip()]
+    if ids:
+        q = q.filter(models.Sucursal.id.in_(ids))
+    sucs = q.all()
+    if not sucs:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Sin sucursales para la plantilla")
+    data = swiss_import_layout.build_product_template_xlsx(sucs)
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="plantilla_catalogo_productos.xlsx"'},
+    )
+
+
+@app.post(
+    "/swiss-admin/catalogos/{catalogo_id}/import-productos-layout",
+    response_model=schemas.SwissImportLayoutResult,
+    tags=["SwissAdmin"],
+)
+async def swiss_catalog_import_productos_layout(
+    catalogo_id: str,
+    requester: models.Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    file: UploadFile = File(...),
+):
+    _require_admin(requester)
+    catalog = db.query(models.CatalogoMaestro).filter(models.CatalogoMaestro.id == catalogo_id).first()
+    if not catalog:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="catalogo no encontrado")
+    links = (
+        db.query(models.CatalogoMaestroSucursal)
+        .filter(models.CatalogoMaestroSucursal.catalogo_id == catalogo_id)
+        .all()
+    )
+    allowed = {link.sucursal_id for link in links}
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El catálogo no tiene sucursales vinculadas; asócialas antes de importar",
+        )
+    raw = await file.read()
+    if len(raw) > 15 * 1024 * 1024:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Archivo demasiado grande (máx 15 MB)")
+    name = (file.filename or "").lower()
+    try:
+        if name.endswith(".csv"):
+            result = swiss_import_layout.parse_product_layout_from_csv(
+                raw, db=db, catalogo_id=catalogo_id, allowed_sucursal_ids=allowed
+            )
+        elif name.endswith(".xlsx"):
+            result = swiss_import_layout.parse_product_layout_from_xlsx(
+                io.BytesIO(raw), db=db, catalogo_id=catalogo_id, allowed_sucursal_ids=allowed
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Formato no soportado; usa .xlsx o .csv",
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        db.rollback()
+        logger.exception("import catalogo productos")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    if not result.get("ok"):
+        return schemas.SwissImportLayoutResult(
+            ok=False,
+            rules_applied=0,
+            errors=result.get("errors") or [],
+            error=result.get("error"),
+        )
+    return schemas.SwissImportLayoutResult(
+        ok=True,
+        rules_applied=int(result.get("rules_applied") or 0),
+        errors=result.get("errors") or [],
+        error=None,
+    )
+
+
+@app.get("/swiss-admin/metodos-pago-alias/plantilla.xlsx", tags=["SwissAdmin"])
+def swiss_metodos_pago_plantilla_xlsx(
+    requester: models.Usuario = Depends(get_current_user),
+):
+    _require_admin(requester)
+    data = swiss_import_layout.build_metodos_template_xlsx()
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="plantilla_metodos_pago.xlsx"'},
+    )
+
+
+@app.post(
+    "/swiss-admin/metodos-pago-alias/import",
+    response_model=schemas.SwissImportLayoutResult,
+    tags=["SwissAdmin"],
+)
+async def swiss_metodos_pago_import_layout(
+    requester: models.Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    sucursal_id: str = Form(...),
+    file: UploadFile = File(...),
+):
+    _require_admin(requester)
+    sid = sucursal_id.strip()
+    suc = db.query(models.Sucursal).filter(models.Sucursal.id == sid).first()
+    if not suc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Sucursal no registrada")
+    raw = await file.read()
+    if len(raw) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Archivo demasiado grande (máx 5 MB)")
+    name = (file.filename or "").lower()
+    try:
+        if name.endswith(".csv"):
+            result = swiss_import_layout.parse_metodos_from_csv(
+                raw, db=db, sucursal_id=sid, norm_fn=_norm_metodo_alias_text
+            )
+        elif name.endswith(".xlsx"):
+            result = swiss_import_layout.parse_metodos_from_xlsx(
+                io.BytesIO(raw), db=db, sucursal_id=sid, norm_fn=_norm_metodo_alias_text
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Formato no soportado; usa .xlsx o .csv",
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        db.rollback()
+        logger.exception("import metodos pago")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    if not result.get("ok"):
+        return schemas.SwissImportLayoutResult(
+            ok=False,
+            rules_applied=0,
+            errors=result.get("errors") or [],
+            error=result.get("error"),
+        )
+    return schemas.SwissImportLayoutResult(
+        ok=True,
+        rules_applied=int(result.get("rules_applied") or 0),
+        errors=result.get("errors") or [],
+        error=None,
     )
 
 
@@ -1941,6 +2102,7 @@ def limpieza_reset(
 # ================================
 # ENDPOINT FASE 4: CATÁLOGO E INTELIGENCIA (Tarea 4.1, 4.2, 4.3)
 # ================================
+@app.get("/dashboard/export/top10", tags=["Reportes"])
 @app.get("/admin/export/top10", tags=["Reportes"])
 def exportar_top_10_csv(
     user: models.Usuario = Depends(get_current_user_dashboard),

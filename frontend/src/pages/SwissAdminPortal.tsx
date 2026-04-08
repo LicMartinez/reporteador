@@ -22,6 +22,8 @@ import {
   deleteSwissSucursal,
   deleteSwissPortalAdmin,
   deleteSwissSucursalVentasImportadas,
+  downloadSwissCatalogProductTemplate,
+  downloadSwissMetodosPlantilla,
   fetchSwissCatalogos,
   fetchSwissMetodosPagoAlias,
   fetchSwissDashboardUsers,
@@ -31,6 +33,8 @@ import {
   patchSwissDashboardUser,
   patchSwissDashboardUserAccess,
   patchSwissSucursal,
+  importSwissCatalogProductLayout,
+  importSwissMetodosPagoLayout,
   updateSwissCatalogo,
   patchSwissMetodoPagoAlias,
   patchSwissPortalAdmin,
@@ -41,6 +45,7 @@ import {
   type SwissAdminUserBrief,
   type SwissSucursalBrief,
   type SwissSucursalLogsItem,
+  type SwissImportLayoutResult,
   type VentasImportadasPurgeResult,
 } from '../api/client';
 
@@ -350,6 +355,11 @@ export default function SwissAdminPortal() {
   const [metodoAliases, setMetodoAliases] = useState<MetodoPagoAliasBrief[]>([]);
   const [metodoAliasFilterSucursalId, setMetodoAliasFilterSucursalId] = useState('');
   const [newMetodoAliasSucursalId, setNewMetodoAliasSucursalId] = useState('');
+  const [plantillaTodasSucursales, setPlantillaTodasSucursales] = useState(true);
+  const [plantillaSucursalIds, setPlantillaSucursalIds] = useState<string[]>([]);
+  const [catalogImportId, setCatalogImportId] = useState('');
+  const [catalogImportResult, setCatalogImportResult] = useState<SwissImportLayoutResult | null>(null);
+  const [metodoImportResult, setMetodoImportResult] = useState<SwissImportLayoutResult | null>(null);
   const [newMetodoAlias, setNewMetodoAlias] = useState('');
   const [newMetodoNombreCanonico, setNewMetodoNombreCanonico] = useState('');
 
@@ -385,6 +395,12 @@ export default function SwissAdminPortal() {
       setNewMetodoAliasSucursalId(sucursales[0].id);
     }
   }, [sucursales, newMetodoAliasSucursalId]);
+
+  useEffect(() => {
+    if (catalogos.length > 0 && !catalogImportId) {
+      setCatalogImportId(catalogos[0].id);
+    }
+  }, [catalogos, catalogImportId]);
 
   const loadMetodosAliases = useCallback(async () => {
     try {
@@ -697,6 +713,80 @@ export default function SwissAdminPortal() {
       await loadMetodosAliases();
     } catch {
       setErr('No se pudo crear la regla (revisa duplicados por sucursal).');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onDownloadPlantillaCatalogo() {
+    setErr(null);
+    try {
+      if (!plantillaTodasSucursales && plantillaSucursalIds.length === 0) {
+        setErr('Selecciona al menos una sucursal o marca “todas las sucursales”.');
+        return;
+      }
+      const blob = await downloadSwissCatalogProductTemplate(plantillaTodasSucursales ? undefined : plantillaSucursalIds);
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'plantilla_catalogo_productos.xlsx';
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch {
+      setErr('No se pudo descargar la plantilla.');
+    }
+  }
+
+  async function onImportCatalogoFromFile(file: File | null) {
+    if (!file || !catalogImportId.trim()) {
+      setErr('Selecciona el catálogo destino y un archivo .xlsx o .csv.');
+      return;
+    }
+    setBusy(true);
+    setErr(null);
+    setCatalogImportResult(null);
+    try {
+      const res = await importSwissCatalogProductLayout(catalogImportId.trim(), file);
+      setCatalogImportResult(res);
+      if (!res.ok) setErr(res.error || 'La importación no se completó.');
+      await loadAll();
+    } catch {
+      setErr('Error al importar el archivo.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onDownloadPlantillaMetodos() {
+    setErr(null);
+    try {
+      const blob = await downloadSwissMetodosPlantilla();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'plantilla_metodos_pago.xlsx';
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch {
+      setErr('No se pudo descargar la plantilla.');
+    }
+  }
+
+  async function onImportMetodosFromFile(file: File | null) {
+    const sid = newMetodoAliasSucursalId.trim();
+    if (!file || !sid) {
+      setErr('Selecciona sucursal y archivo .xlsx o .csv para métodos de pago.');
+      return;
+    }
+    setBusy(true);
+    setErr(null);
+    setMetodoImportResult(null);
+    try {
+      const res = await importSwissMetodosPagoLayout(sid, file);
+      setMetodoImportResult(res);
+      if (!res.ok) setErr(res.error || 'La importación no se completó.');
+      await loadMetodosAliases();
+      await loadAll();
+    } catch {
+      setErr('Error al importar métodos de pago.');
     } finally {
       setBusy(false);
     }
@@ -1171,6 +1261,91 @@ export default function SwissAdminPortal() {
                     </div>
                   </div>
 
+                  <div className="border-t border-slate-200 pt-4 mt-4 space-y-3">
+                    <h4 className="text-sm font-semibold text-slate-800">Plantilla Excel / CSV (productos)</h4>
+                    <p className="text-xs text-slate-500 leading-relaxed">
+                      Fila 1: <span className="font-mono">MASTER</span> y el nombre exacto de cada sucursal en columnas B, D, F… Fila 2:{' '}
+                      <span className="font-mono">DESCRIPCION_DASHBOARD</span> y pares <span className="font-mono">CODIGO</span> /{' '}
+                      <span className="font-mono">DESCRIPCION</span>. Desde la fila 3: columna A = texto maestro en dashboard; a la derecha
+                      código y descripción del POS por sucursal. Solo se crean reglas para sucursales vinculadas al catálogo destino.
+                    </p>
+                    <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={plantillaTodasSucursales}
+                        onChange={(e) => setPlantillaTodasSucursales(e.target.checked)}
+                      />
+                      Incluir todas las sucursales en la plantilla
+                    </label>
+                    {!plantillaTodasSucursales && (
+                      <div className="max-h-32 overflow-y-auto rounded-xl border border-slate-200 p-2 bg-white">
+                        {sucursales.map((s) => (
+                          <label key={s.id} className="flex items-center gap-2 py-1 text-sm text-slate-700">
+                            <input
+                              type="checkbox"
+                              checked={plantillaSucursalIds.includes(s.id)}
+                              onChange={(e) => {
+                                if (e.target.checked) setPlantillaSucursalIds((prev) => [...prev, s.id]);
+                                else setPlantillaSucursalIds((prev) => prev.filter((x) => x !== s.id));
+                              }}
+                            />
+                            <span>{s.nombre.replace(/_/g, ' ')}</span>
+                          </label>
+                        ))}
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      className="w-full py-2.5 rounded-xl border border-slate-300 text-sm font-semibold text-slate-800 hover:bg-slate-50"
+                      onClick={() => void onDownloadPlantillaCatalogo()}
+                    >
+                      Descargar plantilla .xlsx
+                    </button>
+                    <div className="space-y-2">
+                      <label className="block text-xs font-medium text-slate-700">Importar archivo al catálogo</label>
+                      <select
+                        className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-blue-500"
+                        value={catalogImportId}
+                        onChange={(e) => setCatalogImportId(e.target.value)}
+                      >
+                        {catalogos.map((c) => (
+                          <option key={c.id} value={c.id}>
+                            {c.nombre}
+                          </option>
+                        ))}
+                      </select>
+                      <input
+                        type="file"
+                        accept=".xlsx,.csv"
+                        className="block w-full text-sm text-slate-600"
+                        onChange={(e) => {
+                          const f = e.target.files?.[0] ?? null;
+                          e.target.value = '';
+                          void onImportCatalogoFromFile(f);
+                        }}
+                      />
+                    </div>
+                    {catalogImportResult && (
+                      <div
+                        className={`text-xs rounded-xl p-3 border ${
+                          catalogImportResult.ok ? 'bg-emerald-50 border-emerald-200 text-emerald-900' : 'bg-amber-50 border-amber-200 text-amber-900'
+                        }`}
+                      >
+                        <p className="font-semibold">
+                          {catalogImportResult.ok ? 'Importación aplicada' : 'Importación con avisos'}
+                        </p>
+                        <p>Reglas escritas: {catalogImportResult.rules_applied}</p>
+                        {catalogImportResult.errors?.length ? (
+                          <ul className="mt-1 list-disc pl-4 max-h-24 overflow-y-auto">
+                            {catalogImportResult.errors.slice(0, 20).map((x, i) => (
+                              <li key={i}>{x}</li>
+                            ))}
+                          </ul>
+                        ) : null}
+                      </div>
+                    )}
+                  </div>
+
                   <button
                     type="submit"
                     className="w-full py-3 rounded-xl bg-blue-600 text-white font-semibold hover:bg-blue-700 disabled:opacity-60 transition"
@@ -1255,6 +1430,51 @@ export default function SwissAdminPortal() {
                     Crear regla
                   </button>
                 </form>
+
+                <div className="border-t border-slate-200 pt-4 mt-6 space-y-3">
+                  <h4 className="text-sm font-semibold text-slate-800">Importación masiva (.xlsx / .csv)</h4>
+                  <p className="text-xs text-slate-500 leading-relaxed">
+                    Columna A: nombre canónico (ej. <span className="font-mono">TARJETA CREDITO</span>). Columna B: texto exacto del
+                    POS. Varias filas pueden repetir A para unificar varios alias. Usa la misma sucursal que arriba.
+                  </p>
+                  <button
+                    type="button"
+                    className="w-full py-2.5 rounded-xl border border-slate-300 text-sm font-semibold text-slate-800 hover:bg-slate-50"
+                    onClick={() => void onDownloadPlantillaMetodos()}
+                  >
+                    Descargar plantilla métodos de pago
+                  </button>
+                  <label className="block text-xs font-medium text-slate-700">Archivo (misma sucursal que “Nueva regla”)</label>
+                  <input
+                    type="file"
+                    accept=".xlsx,.csv"
+                    className="block w-full text-sm text-slate-600"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0] ?? null;
+                      e.target.value = '';
+                      void onImportMetodosFromFile(f);
+                    }}
+                  />
+                  {metodoImportResult && (
+                    <div
+                      className={`text-xs rounded-xl p-3 border ${
+                        metodoImportResult.ok ? 'bg-emerald-50 border-emerald-200 text-emerald-900' : 'bg-amber-50 border-amber-200 text-amber-900'
+                      }`}
+                    >
+                      <p className="font-semibold">
+                        {metodoImportResult.ok ? 'Importación aplicada' : 'Importación con avisos'}
+                      </p>
+                      <p>Filas procesadas: {metodoImportResult.rules_applied}</p>
+                      {metodoImportResult.errors?.length ? (
+                        <ul className="mt-1 list-disc pl-4 max-h-24 overflow-y-auto">
+                          {metodoImportResult.errors.slice(0, 20).map((x, i) => (
+                            <li key={i}>{x}</li>
+                          ))}
+                        </ul>
+                      ) : null}
+                    </div>
+                  )}
+                </div>
               </section>
 
               <section className="card-premium p-6">

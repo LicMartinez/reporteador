@@ -24,6 +24,22 @@ function PrivateRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+/** El dashboard de socios no aplica a portal_admin (solo Swiss Admin). */
+function SociosDashboardGate({ children }: { children: React.ReactNode }) {
+  const { user, loading } = useAuth();
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-100 text-slate-600">
+        Cargando…
+      </div>
+    );
+  }
+  if (user?.portal_admin) {
+    return <Navigate to="/swiss-admin" replace />;
+  }
+  return <>{children}</>;
+}
+
 function AppRoutes() {
   return (
     <Routes>
@@ -42,7 +58,9 @@ function AppRoutes() {
         path="/"
         element={
           <PrivateRoute>
-            <DashboardLayout />
+            <SociosDashboardGate>
+              <DashboardLayout />
+            </SociosDashboardGate>
           </PrivateRoute>
         }
       >

@@ -207,3 +207,10 @@ class MetodoPagoAliasCreateRequest(BaseModel):
 class MetodoPagoAliasUpdateRequest(BaseModel):
     alias: Optional[str] = Field(None, min_length=1, max_length=256)
     nombre_canonico: Optional[str] = Field(None, min_length=1, max_length=256)
+
+
+class SwissImportLayoutResult(BaseModel):
+    ok: bool
+    rules_applied: int = 0
+    errors: List[str] = []
+    error: Optional[str] = None

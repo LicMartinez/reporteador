@@ -15,6 +15,9 @@ api.interceptors.request.use((config) => {
   if (t) {
     config.headers.Authorization = `Bearer ${t}`;
   }
+  if (config.data instanceof FormData) {
+    delete (config.headers as Record<string, unknown>)['Content-Type'];
+  }
   return config;
 });
 
@@ -133,14 +136,6 @@ export type Resumen = {
   resumen_financiero?: ResumenFinanciero | null;
   comisiones_estimadas?: ComisionesEstimadas | null;
   deltas?: ResumenDeltas | null;
-};
-
-export type AdminUserBrief = {
-  id: string;
-  email: string;
-  nombre: string | null;
-  is_admin: boolean;
-  sucursales: { id: string; nombre: string; rol?: string | null }[];
 };
 
 // =========================
@@ -415,36 +410,50 @@ export async function changePassword(old_password: string, new_password: string)
 }
 
 export async function exportTop10Csv(): Promise<Blob> {
-  const { data } = await api.get('/admin/export/top10', { responseType: 'blob' });
+  const { data } = await api.get('/dashboard/export/top10', { responseType: 'blob' });
   return data as Blob;
 }
 
-// =========================
-// Admin portal
-// =========================
+export type SwissImportLayoutResult = {
+  ok: boolean;
+  rules_applied: number;
+  errors: string[];
+  error?: string | null;
+};
 
-export async function fetchAdminSucursales() {
-  const { data } = await api.get<{ id: string; nombre: string }[]>('/admin/sucursales');
+export async function downloadSwissCatalogProductTemplate(sucursalIds?: string[]) {
+  const sp = new URLSearchParams();
+  if (sucursalIds?.length) {
+    for (const id of sucursalIds) {
+      if (id) sp.append('sucursal_ids', id);
+    }
+  }
+  const q = sp.toString();
+  const { data } = await api.get(`/swiss-admin/catalogos/plantilla-productos.xlsx${q ? `?${q}` : ''}`, {
+    responseType: 'blob',
+  });
+  return data as Blob;
+}
+
+export async function importSwissCatalogProductLayout(catalogoId: string, file: File) {
+  const form = new FormData();
+  form.append('file', file);
+  const { data } = await api.post<SwissImportLayoutResult>(
+    `/swiss-admin/catalogos/${catalogoId}/import-productos-layout`,
+    form
+  );
   return data;
 }
 
-export async function adminCreateSucursal(nombre: string) {
-  const { data } = await api.post<{ id: string; nombre: string }>('/admin/sucursales', { nombre });
-  return data;
+export async function downloadSwissMetodosPlantilla() {
+  const { data } = await api.get('/swiss-admin/metodos-pago-alias/plantilla.xlsx', { responseType: 'blob' });
+  return data as Blob;
 }
 
-export async function fetchAdminUsers() {
-  const { data } = await api.get<AdminUserBrief[]>('/admin/users');
-  return data;
-}
-
-export async function adminCreateUser(body: {
-  email: string;
-  password: string;
-  nombre?: string;
-  is_admin: boolean;
-  sucursal_ids: string[];
-}) {
-  const { data } = await api.post<AdminUserBrief>('/admin/users', body);
+export async function importSwissMetodosPagoLayout(sucursalId: string, file: File) {
+  const form = new FormData();
+  form.append('sucursal_id', sucursalId);
+  form.append('file', file);
+  const { data } = await api.post<SwissImportLayoutResult>('/swiss-admin/metodos-pago-alias/import', form);
   return data;
 }

@@ -18,7 +18,7 @@ export default function Login() {
     );
   }
   if (user) {
-    return <Navigate to="/" replace />;
+    return <Navigate to={user.portal_admin ? '/swiss-admin' : '/'} replace />;
   }
 
   async function onSubmit(e: React.FormEvent) {
