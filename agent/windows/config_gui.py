@@ -115,6 +115,10 @@ def main() -> None:
             "sync_api_key": key_var.get().strip(),
             "loop_seconds": lo,
             "batch_size": bs,
+            "worker_service_name": str(cfg.get("worker_service_name", "DashboardSyncSW")),
+            "worker_watchdog_enabled": bool(cfg.get("worker_watchdog_enabled", True)),
+            "worker_watchdog_interval_seconds": int(cfg.get("worker_watchdog_interval_seconds", 60) or 60),
+            "worker_stale_threshold_seconds": int(cfg.get("worker_stale_threshold_seconds", 900) or 900),
         }
 
     def on_save():
@@ -195,6 +199,35 @@ def main() -> None:
             creationflags=flags,
         )
 
+    def start_watchdog_detached() -> None:
+        if sys.platform != "win32":
+            return
+        CREATE_NO_WINDOW = 0x08000000
+        DETACHED_PROCESS = 0x00000008
+        flags = CREATE_NO_WINDOW | DETACHED_PROCESS
+        if getattr(sys, "frozen", False):
+            exe_dir = os.path.dirname(sys.executable)
+            watchdog = os.path.join(exe_dir, "DashboardSyncSW-watchdog.exe")
+            if not os.path.isfile(watchdog):
+                return
+            args = [watchdog]
+            cwd = exe_dir
+        else:
+            wd_py = _ROOT / "agent" / "windows" / "watchdog_main.py"
+            if not wd_py.is_file():
+                return
+            args = [sys.executable, str(wd_py)]
+            cwd = str(_ROOT)
+        subprocess.Popen(
+            args,
+            cwd=cwd,
+            close_fds=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=flags,
+        )
+
     def on_exit():
         if _busy["v"]:
             messagebox.showinfo(
@@ -207,6 +240,8 @@ def main() -> None:
         except OSError:
             pass
         start_worker_detached()
+        if bool(cfg.get("worker_watchdog_enabled", True)):
+            start_watchdog_detached()
         root.destroy()
 
 
@@ -295,6 +330,8 @@ def main() -> None:
     action_widgets = (btn_save, btn_test, btn_run, btn_exit)
 
     start_worker_detached()
+    if bool(cfg.get("worker_watchdog_enabled", True)):
+        start_watchdog_detached()
     root.protocol("WM_DELETE_WINDOW", on_exit)
     root.mainloop()
 

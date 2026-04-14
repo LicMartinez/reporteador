@@ -8,6 +8,7 @@ migrateLegacyAuthStorage();
 export const api = axios.create({
   baseURL: base.replace(/\/$/, ''),
   headers: { 'Content-Type': 'application/json' },
+  timeout: 45000,
 });
 
 api.interceptors.request.use((config) => {
@@ -385,12 +386,16 @@ export async function fetchResumen(
   fechaDesde: string,
   fechaHasta: string,
   sucursalIds?: string[] | undefined,
-  opts?: { includePrevious?: boolean }
+  opts?: { includePrevious?: boolean; emptySelection?: boolean; productosLimit?: number }
 ) {
   const sp = new URLSearchParams();
   sp.set('fecha_desde', fechaDesde);
   sp.set('fecha_hasta', fechaHasta);
   if (opts?.includePrevious) sp.set('include_previous', 'true');
+  if (opts?.emptySelection) sp.set('empty_selection', 'true');
+  if (typeof opts?.productosLimit === 'number' && opts.productosLimit > 0) {
+    sp.set('productos_limit', String(Math.trunc(opts.productosLimit)));
+  }
   if (sucursalIds && sucursalIds.length > 0) {
     for (const id of sucursalIds) {
       if (id) sp.append('sucursal_ids', id);
@@ -398,6 +403,20 @@ export async function fetchResumen(
   }
   const { data } = await api.get<Resumen>(`/dashboard/resumen?${sp.toString()}`);
   return data;
+}
+
+export function getApiErrorMessage(err: unknown): string {
+  if (axios.isAxiosError(err)) {
+    const st = err.response?.status;
+    if (st === 502 || st === 503 || st === 504) {
+      return 'El servidor tardó demasiado en responder para este rango. Intenta acotar fechas o reintentar.';
+    }
+    if (st === 0 || !err.response) {
+      return 'No se pudo conectar con la API. Verifica red, CORS y URL del backend.';
+    }
+    return `Error de API (${st ?? 'sin código'}).`;
+  }
+  return 'Error inesperado al cargar datos.';
 }
 
 export async function fetchSucursalesFilter() {

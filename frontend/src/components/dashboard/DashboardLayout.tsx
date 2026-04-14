@@ -38,6 +38,8 @@ function DashboardLayoutInner() {
           } md:translate-x-0 fixed md:static inset-y-0 left-0 z-50 md:z-auto transition-transform md:inset-auto`}
         >
           <DashboardSidebar
+            mobile
+            onNavigate={() => setMobileNav(false)}
             onChangePassword={() => {
               setPwOpen(true);
               setPwErr(null);
@@ -66,7 +68,7 @@ function DashboardLayoutInner() {
         </div>
         <div className="flex-1 flex flex-col min-w-0">
           <DashboardTopbar />
-          <main className="flex-1 p-6 md:p-8 overflow-auto">
+          <main className="flex-1 p-3 sm:p-4 md:p-8 overflow-auto">
             {exportErr && <p className="mb-4 text-sm text-red-600">{exportErr}</p>}
             {err && <p className="mb-4 text-sm text-red-600">{err}</p>}
             <Outlet />

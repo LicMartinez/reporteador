@@ -1966,6 +1966,105 @@ def _dashboard_metodo_alias_lookup_map(db: Session) -> Optional[dict[tuple[str, 
     return {(str(a.sucursal_id), str(a.alias_norm)): a.nombre_canonico for a in rows}
 
 
+def _aggregate_productos_clases_pg(
+    db: Session,
+    *,
+    fecha_desde: str,
+    fecha_hasta: str,
+    sucursales_filtro: Optional[List[str]],
+    productos_limit: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if db.get_bind().dialect.name != "postgresql":
+        return [], []
+
+    filt = ""
+    params: dict[str, Any] = {"fd": fecha_desde, "fh": fecha_hasta, "plim": max(1, min(productos_limit, 5000))}
+    if sucursales_filtro is not None:
+        if len(sucursales_filtro) == 0:
+            return [], []
+        params["sids"] = sucursales_filtro
+        filt = "AND v.sucursal_id = ANY(:sids)"
+    sql = text(
+        f"""
+        WITH merged AS (
+          SELECT v.sucursal_id, v.orden, v.detalles
+          FROM ventas v
+          WHERE v.fecha >= :fd AND v.fecha <= :fh {filt}
+          UNION ALL
+          SELECT t.sucursal_id, t.orden, t.detalles
+          FROM ventas_turno t
+          WHERE t.fecha >= :fd AND t.fecha <= :fh {filt}
+            AND NOT EXISTS (
+              SELECT 1 FROM ventas v2
+              WHERE v2.sucursal_id = t.sucursal_id AND v2.orden = t.orden
+                AND v2.fecha >= :fd AND v2.fecha <= :fh
+            )
+        ),
+        lines AS (
+          SELECT
+            COALESCE(NULLIF(trim(d->>'descripcion'), ''), NULLIF(trim(d->>'codigo'), ''), 'Sin descripción') AS nombre,
+            NULLIF(trim(d->>'codigo'), '') AS codigo,
+            CASE
+              WHEN COALESCE((d->>'clase')::int, 0) = 1 THEN 1
+              WHEN COALESCE((d->>'clase')::int, 0) = 2 THEN 2
+              ELSE 3
+            END AS clase,
+            COALESCE((d->>'total_renglon')::numeric, 0) AS total_renglon,
+            COALESCE((d->>'cantidad')::numeric, 0) AS cantidad
+          FROM merged m
+          CROSS JOIN LATERAL jsonb_array_elements(COALESCE(m.detalles::jsonb, '[]'::jsonb)) d
+        )
+        SELECT
+          nombre,
+          MIN(codigo) AS codigo,
+          clase,
+          ROUND(SUM(total_renglon)::numeric, 2) AS total_renglon,
+          ROUND(SUM(cantidad)::numeric, 3) AS cantidad
+        FROM lines
+        GROUP BY nombre, clase
+        ORDER BY SUM(total_renglon) DESC
+        LIMIT :plim
+        """
+    )
+    rs = db.execute(sql, params).mappings().all()
+    productos = [
+        {
+            "nombre": r["nombre"],
+            "codigo": r["codigo"],
+            "clase": int(r["clase"] or 3),
+            "total_renglon": float(r["total_renglon"] or 0),
+            "cantidad": float(r["cantidad"] or 0),
+            "total_costo": 0.0,
+            "margen_pct": None,
+        }
+        for r in rs
+    ]
+    clases_acc: dict[int, dict[str, Any]] = {
+        1: {"name": "BEBIDAS", "clase_key": 1, "total_renglon": 0.0, "cantidad": 0.0},
+        2: {"name": "ALIMENTOS", "clase_key": 2, "total_renglon": 0.0, "cantidad": 0.0},
+        3: {"name": "OTROS ARTICULOS", "clase_key": 3, "total_renglon": 0.0, "cantidad": 0.0},
+    }
+    for p in productos:
+        c = int(p.get("clase") or 3)
+        bucket = clases_acc.get(c) or clases_acc[3]
+        bucket["total_renglon"] += float(p.get("total_renglon") or 0)
+        bucket["cantidad"] += float(p.get("cantidad") or 0)
+    clases = sorted(
+        [
+            {
+                "name": v["name"],
+                "clase_key": v["clase_key"],
+                "total_renglon": round(v["total_renglon"], 2),
+                "cantidad": round(v["cantidad"], 3),
+            }
+            for v in clases_acc.values()
+            if v["total_renglon"] > 0
+        ],
+        key=lambda x: -x["total_renglon"],
+    )
+    return productos, clases
+
+
 @app.get("/dashboard/resumen", tags=["Dashboard"])
 def dashboard_resumen(
     fecha_desde: str,
@@ -1973,6 +2072,8 @@ def dashboard_resumen(
     sucursal_id: Optional[str] = None,
     sucursal_ids: Optional[List[str]] = Query(None),
     include_previous: bool = False,
+    empty_selection: bool = False,
+    productos_limit: int = Query(1000, ge=1, le=5000),
     user: models.Usuario = Depends(get_current_user_dashboard),
     db: Session = Depends(get_db),
 ):
@@ -1982,6 +2083,8 @@ def dashboard_resumen(
     `sucursal_id` (legacy) equivale a una sola sucursal si no hay `sucursal_ids`.
     """
     filtro = _dashboard_sucursales_filtro_ids(db, user, sucursal_id, sucursal_ids)
+    if empty_selection:
+        filtro = []
     if filtro is not None and len(filtro) == 0:
         ventas: List[Any] = []
     else:
@@ -1990,6 +2093,17 @@ def dashboard_resumen(
     suc_map = _dashboard_sucursal_nombres_from_ventas(db, ventas)
     metodo_lu = _dashboard_metodo_alias_lookup_map(db)
     out = _resumen_from_ventas(ventas, sucursal_nombres_por_id=suc_map, metodo_alias_lookup=metodo_lu)
+    productos_sql, clases_sql = _aggregate_productos_clases_pg(
+        db,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+        sucursales_filtro=filtro,
+        productos_limit=productos_limit,
+    )
+    if productos_sql:
+        out["top_productos"] = productos_sql
+    if clases_sql:
+        out["por_clase"] = clases_sql
 
     if include_previous:
         pd, ph = _prev_period_dates(fecha_desde, fecha_hasta)

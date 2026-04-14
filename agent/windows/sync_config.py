@@ -40,6 +40,10 @@ def default_config_dict() -> dict:
         "sync_api_key": "",
         "loop_seconds": 300,
         "batch_size": 250,
+        "worker_service_name": "DashboardSyncSW",
+        "worker_watchdog_enabled": True,
+        "worker_watchdog_interval_seconds": 60,
+        "worker_stale_threshold_seconds": 900,
     }
 
 
@@ -83,6 +87,21 @@ def merged_config() -> dict:
         out["batch_size"] = _parse_int(os.environ.get("SYNC_BATCH_SIZE"), out["batch_size"])
     if os.environ.get("SYNC_LOOP_SECONDS") is not None:
         out["loop_seconds"] = _parse_int(os.environ.get("SYNC_LOOP_SECONDS"), out["loop_seconds"])
+    if os.environ.get("SYNC_WATCHDOG_ENABLED") is not None:
+        raw = str(os.environ.get("SYNC_WATCHDOG_ENABLED") or "").strip().lower()
+        out["worker_watchdog_enabled"] = raw not in ("0", "false", "no", "off")
+    if os.environ.get("SYNC_WATCHDOG_INTERVAL_SECONDS") is not None:
+        out["worker_watchdog_interval_seconds"] = _parse_int(
+            os.environ.get("SYNC_WATCHDOG_INTERVAL_SECONDS"),
+            out["worker_watchdog_interval_seconds"],
+        )
+    if os.environ.get("SYNC_STALE_THRESHOLD_SECONDS") is not None:
+        out["worker_stale_threshold_seconds"] = _parse_int(
+            os.environ.get("SYNC_STALE_THRESHOLD_SECONDS"),
+            out["worker_stale_threshold_seconds"],
+        )
+    if os.environ.get("SYNC_WORKER_SERVICE_NAME"):
+        out["worker_service_name"] = os.environ.get("SYNC_WORKER_SERVICE_NAME", "").strip()
 
     data_dir = ensure_data_dir()
     out["data_dir"] = str(data_dir)
@@ -93,6 +112,8 @@ def merged_config() -> dict:
     else:
         cp = file_data.get("checkpoint_path") if isinstance(file_data.get("checkpoint_path"), str) else ""
         out["checkpoint_path"] = (cp.strip() if cp else str(data_dir / "sync_checkpoint.json"))
+    hb = file_data.get("heartbeat_path") if isinstance(file_data.get("heartbeat_path"), str) else ""
+    out["heartbeat_path"] = hb.strip() if hb.strip() else str(data_dir / "agent_heartbeat.json")
 
     return out
 
@@ -109,6 +130,11 @@ def save_config_file(cfg: dict, path: Path | None = None) -> Path:
         "loop_seconds",
         "batch_size",
         "checkpoint_path",
+        "heartbeat_path",
+        "worker_service_name",
+        "worker_watchdog_enabled",
+        "worker_watchdog_interval_seconds",
+        "worker_stale_threshold_seconds",
     )
     to_write = {k: cfg.get(k) for k in keys}
     if not str(to_write.get("checkpoint_path") or "").strip():

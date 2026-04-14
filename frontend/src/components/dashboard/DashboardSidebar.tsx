@@ -23,16 +23,22 @@ export function DashboardSidebar({
   onExportTop10,
   onExportExcel,
   onExportPdf,
+  mobile = false,
+  onNavigate,
 }: {
   onChangePassword: () => void;
   onExportTop10: () => void;
   onExportExcel: () => void;
   onExportPdf: () => void;
+  mobile?: boolean;
+  onNavigate?: () => void;
 }) {
   const { user, logout } = useAuth();
 
   return (
-    <aside className="hidden md:flex w-72 shrink-0 flex-col bg-[#0f172a] text-slate-100 min-h-screen sticky top-0 border-r border-slate-800">
+    <aside
+      className={`${mobile ? 'flex w-[18rem] min-h-screen' : 'hidden md:flex w-72 min-h-screen sticky top-0'} shrink-0 flex-col bg-[#0f172a] text-slate-100 border-r border-slate-800`}
+    >
       <div className="p-6 border-b border-slate-800/80">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center shadow-lg">
@@ -53,23 +59,23 @@ export function DashboardSidebar({
       </div>
 
       <nav className="flex flex-col gap-1 p-4 flex-1">
-        <NavLink to="/" end className={navCls}>
+        <NavLink to="/" end className={navCls} onClick={onNavigate}>
           <LayoutDashboard className="w-5 h-5 shrink-0" />
           Resumen general
         </NavLink>
-        <NavLink to="/ventas" className={navCls}>
+        <NavLink to="/ventas" className={navCls} onClick={onNavigate}>
           <BarChart3 className="w-5 h-5 shrink-0" />
           Análisis de ventas
         </NavLink>
-        <NavLink to="/productos" className={navCls}>
+        <NavLink to="/productos" className={navCls} onClick={onNavigate}>
           <Package className="w-5 h-5 shrink-0" />
           Productos y categorías
         </NavLink>
-        <NavLink to="/meseros" className={navCls}>
+        <NavLink to="/meseros" className={navCls} onClick={onNavigate}>
           <UserCircle className="w-5 h-5 shrink-0" />
           Desempeño meseros
         </NavLink>
-        <NavLink to="/pagos" className={navCls}>
+        <NavLink to="/pagos" className={navCls} onClick={onNavigate}>
           <CreditCard className="w-5 h-5 shrink-0" />
           Métodos de pago
         </NavLink>
@@ -77,6 +83,7 @@ export function DashboardSidebar({
         {user?.portal_admin && (
           <NavLink
             to="/swiss-admin"
+            onClick={onNavigate}
             className="flex items-center gap-3 px-4 py-3 rounded-xl font-semibold text-left text-slate-300 hover:bg-slate-800 hover:text-white border border-dashed border-slate-600 mt-2"
           >
             <Users className="w-5 h-5 shrink-0" />

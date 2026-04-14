@@ -5,15 +5,29 @@ import datetime
 import logging
 import sys
 import math
+import tempfile
 from typing import Any, Callable, Dict, List
 
 import httpx
 from dbfread import DBF
+from dbfread.field_parser import FieldParser
 
 from agent.windows.sync_config import merged_config
 
+
+class _TolerantDbfFieldParser(FieldParser):
+    """Fechas D vacías: dbfread solo acepta espacios/ceros ASCII; RestBar a veces usa 8 bytes nulos."""
+
+    def parseD(self, field, data):
+        if not data:
+            return None
+        if all(b == 0 for b in data):
+            return None
+        return super().parseD(field, data)
+
 _settings: dict = {}
 _logger_configured = False
+_heartbeat_cycle_seq = 0
 
 
 def _setup_logging() -> None:
@@ -107,6 +121,70 @@ def save_checkpoint(path: str, last_orden: str) -> None:
         json.dump({"last_orden": last_orden, "updated": datetime.datetime.now().isoformat()}, f, indent=2)
 
 
+def _atomic_write_json(path: str, payload: dict) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(prefix="heartbeat_", suffix=".tmp", dir=os.path.dirname(path) or ".")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _heartbeat_base(settings: dict) -> dict[str, Any]:
+    now = datetime.datetime.now().isoformat()
+    return {
+        "pid": os.getpid(),
+        "started_at": now,
+        "last_heartbeat_at": now,
+        "last_success_at": None,
+        "phase": "startup",
+        "status": "starting",
+        "cycle_seq": 0,
+        "sucursal": settings.get("sucursal_nombre", ""),
+    }
+
+
+def heartbeat_write(
+    settings: dict,
+    *,
+    phase: str,
+    status: str,
+    cycle_seq: int | None = None,
+    last_success: bool = False,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    hb_path = str(settings.get("heartbeat_path") or "").strip()
+    if not hb_path:
+        return
+    now = datetime.datetime.now().isoformat()
+    payload = _heartbeat_base(settings)
+    try:
+        if os.path.isfile(hb_path):
+            with open(hb_path, encoding="utf-8") as f:
+                prev = json.load(f)
+            if isinstance(prev, dict):
+                payload.update(prev)
+    except Exception:
+        pass
+    payload["pid"] = os.getpid()
+    payload["last_heartbeat_at"] = now
+    payload["phase"] = phase
+    payload["status"] = status
+    if cycle_seq is not None:
+        payload["cycle_seq"] = cycle_seq
+    if last_success:
+        payload["last_success_at"] = now
+    if extra:
+        payload.update(extra)
+    _atomic_write_json(hb_path, payload)
+
+
 def safely_read_dbf(dbc_dir: str, file_name: str, retries: int = 5, delay: int = 5) -> List[dict]:
     path = os.path.join(dbc_dir, file_name)
     if not os.path.exists(path):
@@ -115,7 +193,12 @@ def safely_read_dbf(dbc_dir: str, file_name: str, retries: int = 5, delay: int =
 
     for attempt in range(retries):
         try:
-            dbf = DBF(path, encoding="latin-1", ignore_missing_memofile=True)
+            dbf = DBF(
+                path,
+                encoding="latin-1",
+                ignore_missing_memofile=True,
+                parserclass=_TolerantDbfFieldParser,
+            )
             return [dict(r) for r in dbf]
         except (OSError, PermissionError) as e:
             logging.warning(
@@ -524,6 +607,7 @@ def _execute_single_sync(progress: Callable[[str, float], None] | None = None) -
     api = s.get("sync_api_url", "")
 
     logging.info("Agente sync — sucursal=%s API=%s DBC=%s", suc, api, dbc)
+    heartbeat_write(s, phase="sync_start", status="running")
     if not s.get("sucursal_password"):
         logging.warning("sucursal_password vacio. La subida a /sync/upload fallara.")
 
@@ -551,12 +635,19 @@ def _execute_single_sync(progress: Callable[[str, float], None] | None = None) -
         )
     tarjetas_map = get_tarjetas_map(dbc)
     meseros_map = get_meseros_map(dbc)
+    heartbeat_write(s, phase="turno_snapshot", status="running")
     if progress:
         progress("Procesando turno actual (FACTURA1T)…", 12.0)
     turno_rows = process_turno_actual(dbc, tarjetas_map, meseros_map)
     if progress:
         progress("Procesando ventas históricas pendientes…", 18.0)
     historical_sales = process_historical(dbc, tarjetas_map, meseros_map, last)
+    heartbeat_write(
+        s,
+        phase="ready_to_upload",
+        status="running",
+        extra={"pending_historial_tickets": len(historical_sales), "pending_turno_rows": len(turno_rows)},
+    )
 
     if not historical_sales and not turno_rows:
         logging.info("Sin datos de turno ni histórico nuevo.")
@@ -575,6 +666,12 @@ def _execute_single_sync(progress: Callable[[str, float], None] | None = None) -
         if progress:
             pct = 25.0 + 70.0 * (cur / max(total, 1))
             progress(f"Subiendo al servidor: lote {cur} de {total}…", min(pct, 99.0))
+        heartbeat_write(
+            s,
+            phase="upload_chunk",
+            status="running",
+            extra={"chunk_current": cur, "chunk_total": total},
+        )
 
     logging.info(
         "Enviando sync — histórico: %s ticket(s), turno_actual: %s",
@@ -591,6 +688,7 @@ def _execute_single_sync(progress: Callable[[str, float], None] | None = None) -
         )
     except Exception as e:
         logging.exception("Fallo en sync: %s", e)
+        heartbeat_write(s, phase="sync_error", status="error", extra={"last_error": str(e)})
         if progress:
             progress(f"Error: {e}", 100.0)
         return {
@@ -615,6 +713,13 @@ def _execute_single_sync(progress: Callable[[str, float], None] | None = None) -
             f"nuevas ~{summary['nuevas']}, turno_filas {summary.get('turno_filas', 0)}.",
             100.0,
         )
+    heartbeat_write(
+        s,
+        phase="sync_ok",
+        status="idle",
+        last_success=True,
+        extra={"nuevas": summary["nuevas"], "errores": summary["errores"], "turno_filas": summary.get("turno_filas", 0)},
+    )
     return {
         "success": True,
         "tickets": len(historical_sales),
@@ -634,16 +739,38 @@ def run_sync_from_gui(progress: Callable[[str, float], None]) -> dict:
 
 
 def run_sync_agent() -> None:
+    global _heartbeat_cycle_seq
     s = reload_settings()
     loop = int(s.get("loop_seconds") or 0)
+    heartbeat_write(s, phase="agent_loop_init", status="running")
     if loop > 0:
         while True:
+            _heartbeat_cycle_seq += 1
+            cycle_started = time.time()
+            heartbeat_write(s, phase="cycle_start", status="running", cycle_seq=_heartbeat_cycle_seq)
             try:
                 run_once()
             except Exception as e:
                 logging.exception("Error en ciclo de sync: %s", e)
+                heartbeat_write(
+                    s,
+                    phase="cycle_exception",
+                    status="error",
+                    cycle_seq=_heartbeat_cycle_seq,
+                    extra={"last_error": str(e)},
+                )
+            elapsed = round(time.time() - cycle_started, 3)
+            heartbeat_write(
+                s,
+                phase="cycle_sleep",
+                status="idle",
+                cycle_seq=_heartbeat_cycle_seq,
+                extra={"last_cycle_seconds": elapsed, "loop_seconds": loop},
+            )
             time.sleep(loop)
     else:
+        _heartbeat_cycle_seq += 1
+        heartbeat_write(s, phase="single_run", status="running", cycle_seq=_heartbeat_cycle_seq)
         run_once()
 
 
@@ -658,6 +785,10 @@ def main() -> None:
             sys.path.insert(0, root_guess)
     _setup_logging()
     reload_settings()
+    try:
+        heartbeat_write(_settings, phase="main_ready", status="running")
+    except Exception:
+        logging.exception("No se pudo escribir heartbeat al arranque.")
     run_sync_agent()
 
 

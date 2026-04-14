@@ -9,7 +9,7 @@ import {
   type ReactNode,
 } from 'react';
 import { format, startOfMonth, subDays } from 'date-fns';
-import { fetchResumen, fetchSucursalesFilter, type Resumen } from '../api/client';
+import { fetchResumen, fetchSucursalesFilter, getApiErrorMessage, type Resumen } from '../api/client';
 
 export type DatePreset = 'hoy' | 'ayer' | '7d' | '30d' | 'este_mes' | 'personalizado';
 
@@ -67,6 +67,17 @@ function sameSet(a: string[], b: string[]): boolean {
   return b.every((x) => sa.has(x));
 }
 
+function daysBetweenIso(desde: string, hasta: string): number {
+  try {
+    const d0 = new Date(`${desde}T00:00:00`);
+    const d1 = new Date(`${hasta}T00:00:00`);
+    const ms = d1.getTime() - d0.getTime();
+    return Math.max(1, Math.floor(ms / 86400000) + 1);
+  } catch {
+    return 1;
+  }
+}
+
 export type DashboardShellValue = {
   preset: DatePreset;
   setPreset: (p: DatePreset) => void;
@@ -111,8 +122,7 @@ export function DashboardShellProvider({ children }: { children: ReactNode }) {
   const toggleSucursalId = useCallback((id: string) => {
     setSelectedSucursalIds((prev) => {
       if (prev.includes(id)) {
-        const next = prev.filter((x) => x !== id);
-        return next.length === 0 ? prev : next;
+        return prev.filter((x) => x !== id);
       }
       return [...prev, id];
     });
@@ -135,7 +145,8 @@ export function DashboardShellProvider({ children }: { children: ReactNode }) {
       const firstSucursalesLoad = prevAllowed.length === 0;
 
       let next = prev.filter((id) => allowedIds.includes(id));
-      if (next.length === 0 && allowedIds.length > 0) {
+      const hasPriorManualSelection = prevAllowed.length > 0;
+      if (next.length === 0 && allowedIds.length > 0 && !hasPriorManualSelection) {
         next = [...allowedIds];
       } else if (!firstSucursalesLoad) {
         const newlyAdded = allowedIds.filter((id) => !prevAllowed.includes(id));
@@ -152,12 +163,33 @@ export function DashboardShellProvider({ children }: { children: ReactNode }) {
         allowedIds.length > 0 &&
         next.length === allowedIds.length &&
         allowedIds.every((id) => next.includes(id));
-      const res = await fetchResumen(fechaDesde, fechaHasta, allSelected ? undefined : next, {
-        includePrevious: true,
-      });
+      const noSelection = next.length === 0;
+      const rangeDays = daysBetweenIso(fechaDesde, fechaHasta);
+      const includePrevious = rangeDays <= 62;
+      const runFetch = () =>
+        fetchResumen(fechaDesde, fechaHasta, allSelected ? undefined : next, {
+          includePrevious,
+          emptySelection: noSelection,
+          productosLimit: 1000,
+        });
+      let res: Resumen;
+      try {
+        res = await runFetch();
+      } catch (err) {
+        const msg = getApiErrorMessage(err);
+        if (msg.includes('tardó demasiado')) {
+          res = await fetchResumen(fechaDesde, fechaHasta, allSelected ? undefined : next, {
+            includePrevious: false,
+            emptySelection: noSelection,
+            productosLimit: 500,
+          });
+        } else {
+          throw err;
+        }
+      }
       setData(normalizeResumen(res));
-    } catch {
-      setErr('No se pudieron cargar los datos. Revisa la API y el token.');
+    } catch (err) {
+      setErr(getApiErrorMessage(err));
       setData(null);
     } finally {
       setLoading(false);
