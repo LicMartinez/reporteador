@@ -1977,23 +1977,25 @@ def _aggregate_productos_clases_pg(
     if db.get_bind().dialect.name != "postgresql":
         return [], []
 
-    filt = ""
+    filt_v = ""
+    filt_t = ""
     params: dict[str, Any] = {"fd": fecha_desde, "fh": fecha_hasta, "plim": max(1, min(productos_limit, 5000))}
     if sucursales_filtro is not None:
         if len(sucursales_filtro) == 0:
             return [], []
         params["sids"] = sucursales_filtro
-        filt = "AND v.sucursal_id = ANY(:sids)"
+        filt_v = "AND v.sucursal_id = ANY(:sids)"
+        filt_t = "AND t.sucursal_id = ANY(:sids)"
     sql = text(
         f"""
         WITH merged AS (
           SELECT v.sucursal_id, v.orden, v.detalles
           FROM ventas v
-          WHERE v.fecha >= :fd AND v.fecha <= :fh {filt}
+          WHERE v.fecha >= :fd AND v.fecha <= :fh {filt_v}
           UNION ALL
           SELECT t.sucursal_id, t.orden, t.detalles
           FROM ventas_turno t
-          WHERE t.fecha >= :fd AND t.fecha <= :fh {filt}
+          WHERE t.fecha >= :fd AND t.fecha <= :fh {filt_t}
             AND NOT EXISTS (
               SELECT 1 FROM ventas v2
               WHERE v2.sucursal_id = t.sucursal_id AND v2.orden = t.orden
