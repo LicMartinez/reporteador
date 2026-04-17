@@ -64,6 +64,12 @@ def ensure_schema_columns() -> None:
             with engine.begin() as conn:
                 conn.execute(text(sql))
 
+    if "sucursales" in names:
+        scols = {c["name"] for c in insp.get_columns("sucursales")}
+        if "hora_corte_operativa_minutos" not in scols:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE sucursales ADD COLUMN hora_corte_operativa_minutos INTEGER"))
+
 
 def get_db():
     db = SessionLocal()

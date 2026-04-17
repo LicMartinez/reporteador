@@ -9,30 +9,75 @@ import {
   type ReactNode,
 } from 'react';
 import { format, startOfMonth, subDays } from 'date-fns';
-import { fetchResumen, fetchSucursalesFilter, getApiErrorMessage, type Resumen } from '../api/client';
+import {
+  fetchResumen,
+  fetchSucursalesFilter,
+  getApiErrorMessage,
+  type DashboardSucursalFilterItem,
+  type Resumen,
+} from '../api/client';
 
 export type DatePreset = 'hoy' | 'ayer' | '7d' | '30d' | 'este_mes' | 'personalizado';
+
+/** Ancla de “hoy” operativo: antes del corte = aún día comercial anterior. */
+function operationalDayAnchor(cutoff: number): Date {
+  const now = new Date();
+  const mins = now.getHours() * 60 + now.getMinutes();
+  if (mins < cutoff) return subDays(now, 1);
+  return now;
+}
+
+function operationalCutoffForSelection(
+  sucs: DashboardSucursalFilterItem[],
+  selectedIds: string[]
+): number | null {
+  if (!sucs.length) return null;
+  const targets = selectedIds.length ? sucs.filter((s) => selectedIds.includes(s.id)) : sucs;
+  if (!targets.length) return null;
+  const vals = targets.map((s) => s.hora_corte_operativa_minutos);
+  if (vals.some((v) => v == null || v === undefined)) return null;
+  const nums = vals as number[];
+  const uniq = new Set(nums);
+  if (uniq.size !== 1) return null;
+  return nums[0];
+}
 
 function computeRange(
   preset: DatePreset,
   customDesde: string,
-  customHasta: string
+  customHasta: string,
+  diaOperativo: boolean,
+  cutoff: number | null
 ): { fechaDesde: string; fechaHasta: string } {
   const today = new Date();
   const todayStr = format(today, 'yyyy-MM-dd');
+  const useOp = diaOperativo && cutoff != null;
+  const anchor = useOp ? operationalDayAnchor(cutoff) : today;
+  const anchorStr = format(anchor, 'yyyy-MM-dd');
+
   switch (preset) {
     case 'hoy':
-      return { fechaDesde: todayStr, fechaHasta: todayStr };
+      return useOp ? { fechaDesde: anchorStr, fechaHasta: anchorStr } : { fechaDesde: todayStr, fechaHasta: todayStr };
     case 'ayer': {
+      if (useOp) {
+        const y = format(subDays(anchor, 1), 'yyyy-MM-dd');
+        return { fechaDesde: y, fechaHasta: y };
+      }
       const y = format(subDays(today, 1), 'yyyy-MM-dd');
       return { fechaDesde: y, fechaHasta: y };
     }
     case '7d':
-      return { fechaDesde: format(subDays(today, 6), 'yyyy-MM-dd'), fechaHasta: todayStr };
+      return useOp
+        ? { fechaDesde: format(subDays(anchor, 6), 'yyyy-MM-dd'), fechaHasta: anchorStr }
+        : { fechaDesde: format(subDays(today, 6), 'yyyy-MM-dd'), fechaHasta: todayStr };
     case '30d':
-      return { fechaDesde: format(subDays(today, 29), 'yyyy-MM-dd'), fechaHasta: todayStr };
+      return useOp
+        ? { fechaDesde: format(subDays(anchor, 29), 'yyyy-MM-dd'), fechaHasta: anchorStr }
+        : { fechaDesde: format(subDays(today, 29), 'yyyy-MM-dd'), fechaHasta: todayStr };
     case 'este_mes':
-      return { fechaDesde: format(startOfMonth(today), 'yyyy-MM-dd'), fechaHasta: todayStr };
+      return useOp
+        ? { fechaDesde: format(startOfMonth(anchor), 'yyyy-MM-dd'), fechaHasta: anchorStr }
+        : { fechaDesde: format(startOfMonth(today), 'yyyy-MM-dd'), fechaHasta: todayStr };
     case 'personalizado':
       return {
         fechaDesde: customDesde || todayStr,
@@ -87,11 +132,15 @@ export type DashboardShellValue = {
   setCustomHasta: (s: string) => void;
   fechaDesde: string;
   fechaHasta: string;
+  diaOperativo: boolean;
+  setDiaOperativo: (v: boolean) => void;
+  /** Corte compartido por sucursales seleccionadas, o null si no aplica modo operativo. */
+  operationalCutoffMinutes: number | null;
   selectedSucursalIds: string[];
   setSelectedSucursalIds: (ids: string[] | ((prev: string[]) => string[])) => void;
   toggleSucursalId: (id: string) => void;
   selectAllSucursales: () => void;
-  sucursales: { id: string; nombre: string }[];
+  sucursales: DashboardSucursalFilterItem[];
   data: Resumen | null;
   loading: boolean;
   err: string | null;
@@ -105,7 +154,8 @@ export function DashboardShellProvider({ children }: { children: ReactNode }) {
   const [customDesde, setCustomDesde] = useState(() => format(subDays(new Date(), 6), 'yyyy-MM-dd'));
   const [customHasta, setCustomHasta] = useState(() => format(new Date(), 'yyyy-MM-dd'));
   const [selectedSucursalIds, setSelectedSucursalIds] = useState<string[]>([]);
-  const [sucursales, setSucursales] = useState<{ id: string; nombre: string }[]>([]);
+  const [sucursales, setSucursales] = useState<DashboardSucursalFilterItem[]>([]);
+  const [diaOperativo, setDiaOperativo] = useState(false);
   const [data, setData] = useState<Resumen | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -114,10 +164,23 @@ export function DashboardShellProvider({ children }: { children: ReactNode }) {
   selectedRef.current = selectedSucursalIds;
   const prevAllowedSucursalIdsRef = useRef<string[]>([]);
 
-  const { fechaDesde, fechaHasta } = useMemo(
-    () => computeRange(preset, customDesde, customHasta),
-    [preset, customDesde, customHasta]
+  const operationalCutoffMinutes = useMemo(
+    () => operationalCutoffForSelection(sucursales, selectedSucursalIds),
+    [sucursales, selectedSucursalIds]
   );
+
+  useEffect(() => {
+    if (diaOperativo && operationalCutoffMinutes == null) {
+      setDiaOperativo(false);
+    }
+  }, [diaOperativo, operationalCutoffMinutes]);
+
+  const { fechaDesde, fechaHasta } = useMemo(
+    () => computeRange(preset, customDesde, customHasta, diaOperativo, operationalCutoffMinutes),
+    [preset, customDesde, customHasta, diaOperativo, operationalCutoffMinutes]
+  );
+
+  const modoOperativoFetch = diaOperativo && operationalCutoffMinutes != null;
 
   const toggleSucursalId = useCallback((id: string) => {
     setSelectedSucursalIds((prev) => {
@@ -171,6 +234,7 @@ export function DashboardShellProvider({ children }: { children: ReactNode }) {
           includePrevious,
           emptySelection: noSelection,
           productosLimit: 1000,
+          modoOperativo: modoOperativoFetch,
         });
       let res: Resumen;
       try {
@@ -182,6 +246,7 @@ export function DashboardShellProvider({ children }: { children: ReactNode }) {
             includePrevious: false,
             emptySelection: noSelection,
             productosLimit: 500,
+            modoOperativo: modoOperativoFetch,
           });
         } else {
           throw err;
@@ -194,7 +259,7 @@ export function DashboardShellProvider({ children }: { children: ReactNode }) {
     } finally {
       setLoading(false);
     }
-  }, [fechaDesde, fechaHasta, selectedSucursalIds]);
+  }, [fechaDesde, fechaHasta, selectedSucursalIds, modoOperativoFetch]);
 
   useEffect(() => {
     reload();
@@ -210,6 +275,9 @@ export function DashboardShellProvider({ children }: { children: ReactNode }) {
       setCustomHasta,
       fechaDesde,
       fechaHasta,
+      diaOperativo,
+      setDiaOperativo,
+      operationalCutoffMinutes,
       selectedSucursalIds,
       setSelectedSucursalIds,
       toggleSucursalId,
@@ -226,6 +294,9 @@ export function DashboardShellProvider({ children }: { children: ReactNode }) {
       customHasta,
       fechaDesde,
       fechaHasta,
+      diaOperativo,
+      setDiaOperativo,
+      operationalCutoffMinutes,
       selectedSucursalIds,
       toggleSucursalId,
       selectAllSucursales,

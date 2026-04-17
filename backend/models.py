@@ -44,7 +44,10 @@ class Sucursal(Base):
     # Credencial para el agent de sincronización (validar quién puede subir datos).
     sync_password_hash = Column(String, nullable=True)
     last_connection_at = Column(DateTime, nullable=True)
-    
+    # Minutos 0..1439 desde medianoche: ventas con hora < corte en fecha calendario
+    # pertenecen al día operativo anterior (turnos nocturnos). NULL = día calendario POS.
+    hora_corte_operativa_minutos = Column(Integer, nullable=True)
+
     ventas = relationship("Venta", back_populates="sucursal")
     ventas_turno = relationship("VentaTurno", back_populates="sucursal", cascade="all, delete-orphan")
     logs = relationship("LogSync", back_populates="sucursal")

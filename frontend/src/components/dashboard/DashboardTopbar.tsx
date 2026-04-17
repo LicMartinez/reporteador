@@ -36,6 +36,9 @@ export function DashboardTopbar() {
     sucursales,
     fechaDesde,
     fechaHasta,
+    diaOperativo,
+    setDiaOperativo,
+    operationalCutoffMinutes,
     loading,
     reload,
   } = useDashboardShell();
@@ -55,10 +58,19 @@ export function DashboardTopbar() {
     return () => document.removeEventListener('mousedown', onDoc);
   }, [sucOpen]);
 
-  const periodLabel = useMemo(
-    () => `${fechaDesde} — ${fechaHasta}`,
-    [fechaDesde, fechaHasta]
-  );
+  const periodLabel = useMemo(() => {
+    const base = `${fechaDesde} — ${fechaHasta}`;
+    if (diaOperativo && operationalCutoffMinutes != null) {
+      const h = Math.floor(operationalCutoffMinutes / 60);
+      const m = operationalCutoffMinutes % 60;
+      const hh = String(h).padStart(2, '0');
+      const mm = String(m).padStart(2, '0');
+      return `${base} · día operativo (corte ${hh}:${mm})`;
+    }
+    return base;
+  }, [fechaDesde, fechaHasta, diaOperativo, operationalCutoffMinutes]);
+
+  const canDiaOperativo = operationalCutoffMinutes != null;
 
   const allowedIds = useMemo(() => sucursales.map((s) => s.id), [sucursales]);
   const allSelected = sameSelection(allowedIds, selectedSucursalIds);
@@ -152,6 +164,25 @@ export function DashboardTopbar() {
               <option value="personalizado">Personalizado</option>
             </select>
           </div>
+
+          <label
+            className={`flex items-center gap-2 rounded-xl border px-3 py-2 text-sm shadow-sm ${
+              canDiaOperativo ? 'cursor-pointer border-slate-200 bg-white' : 'cursor-not-allowed border-slate-100 bg-slate-50 text-slate-400'
+            }`}
+            title={
+              canDiaOperativo
+                ? 'Filtra por día comercial y presets “Hoy” según corte (todas las sucursales visibles deben compartir el mismo corte).'
+                : 'Configura la misma hora de corte en todas las sucursales seleccionadas (Swiss Admin) para habilitar.'
+            }
+          >
+            <input
+              type="checkbox"
+              checked={diaOperativo}
+              disabled={!canDiaOperativo}
+              onChange={(e) => setDiaOperativo(e.target.checked)}
+            />
+            <span className="font-medium text-slate-700">Día operativo</span>
+          </label>
 
           {preset === 'personalizado' && (
             <div className="flex flex-wrap items-center gap-2">
@@ -251,6 +282,19 @@ export function DashboardTopbar() {
                   <input type="date" value={customHasta} onChange={(e) => setCustomHasta(e.target.value)} className="text-sm rounded-xl border border-slate-200 px-3 py-2 font-mono" />
                 </div>
               )}
+              <label
+                className={`flex items-center gap-2 rounded-xl border px-3 py-2 text-sm ${
+                  canDiaOperativo ? 'border-slate-200 bg-white' : 'border-slate-100 bg-slate-50 text-slate-400'
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  checked={diaOperativo}
+                  disabled={!canDiaOperativo}
+                  onChange={(e) => setDiaOperativo(e.target.checked)}
+                />
+                <span className="font-medium">Día operativo</span>
+              </label>
               <button
                 type="button"
                 onClick={() => {

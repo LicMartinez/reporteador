@@ -20,6 +20,7 @@ import logging
 
 from .database import Base, engine, get_db, ensure_schema_columns
 from . import models
+from . import operativa
 from .etl_matcher import ETLMatcher
 from . import swiss_import_layout
 from .auth_core import create_access_token, verify_password, hash_password
@@ -215,7 +216,12 @@ def swiss_admin_list_sucursales(
     _require_admin(user)
     rows = db.query(models.Sucursal).order_by(models.Sucursal.nombre).all()
     return [
-        schemas.SwissSucursalBrief(id=s.id, nombre=s.nombre, last_connection_at=_dt_to_iso(s.last_connection_at))
+        schemas.SwissSucursalBrief(
+            id=s.id,
+            nombre=s.nombre,
+            last_connection_at=_dt_to_iso(s.last_connection_at),
+            hora_corte_operativa_minutos=s.hora_corte_operativa_minutos,
+        )
         for s in rows
     ]
 
@@ -331,7 +337,12 @@ def swiss_admin_create_sucursal(
         db.rollback()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="No se pudo crear la sucursal") from exc
 
-    return schemas.SwissSucursalBrief(id=suc.id, nombre=suc.nombre, last_connection_at=_dt_to_iso(suc.last_connection_at))
+    return schemas.SwissSucursalBrief(
+        id=suc.id,
+        nombre=suc.nombre,
+        last_connection_at=_dt_to_iso(suc.last_connection_at),
+        hora_corte_operativa_minutos=suc.hora_corte_operativa_minutos,
+    )
 
 
 def _swiss_admin_purge_sucursal_relations(db: Session, suc: models.Sucursal) -> None:
@@ -375,9 +386,16 @@ def swiss_admin_update_sucursal(
     payload = body.model_dump(exclude_unset=True)
     if "sync_password" in payload and payload["sync_password"]:
         suc.sync_password_hash = hash_password(payload["sync_password"])
+    if "hora_corte_operativa_minutos" in body.model_fields_set:
+        suc.hora_corte_operativa_minutos = body.hora_corte_operativa_minutos
     db.commit()
     db.refresh(suc)
-    return schemas.SwissSucursalBrief(id=suc.id, nombre=suc.nombre, last_connection_at=_dt_to_iso(suc.last_connection_at))
+    return schemas.SwissSucursalBrief(
+        id=suc.id,
+        nombre=suc.nombre,
+        last_connection_at=_dt_to_iso(suc.last_connection_at),
+        hora_corte_operativa_minutos=suc.hora_corte_operativa_minutos,
+    )
 
 
 @app.delete("/swiss-admin/sucursales/{sucursal_id}", tags=["SwissAdmin"])
@@ -1439,19 +1457,35 @@ def _dashboard_sucursales_filtro_ids(
     return req
 
 
+def _cutoff_map_for_sucursales(db: Session, sucursales_filtro: Optional[List[str]]) -> dict[str, Optional[int]]:
+    q = db.query(models.Sucursal.id, models.Sucursal.hora_corte_operativa_minutos)
+    if sucursales_filtro is not None:
+        if len(sucursales_filtro) == 0:
+            return {}
+        q = q.filter(models.Sucursal.id.in_(sucursales_filtro))
+    rows = q.all()
+    return {str(r[0]): r[1] for r in rows}
+
+
 def _ventas_en_rango(
     db: Session,
     user: models.Usuario,
     fecha_desde: str,
     fecha_hasta: str,
     sucursales_filtro: Optional[List[str]],
+    modo_operativo: bool = False,
 ) -> List[models.Venta]:
     q = db.query(models.Venta).join(models.Sucursal, models.Venta.sucursal_id == models.Sucursal.id)
 
     if sucursales_filtro is not None:
         q = q.filter(models.Venta.sucursal_id.in_(sucursales_filtro))
 
-    q = q.filter(models.Venta.fecha >= fecha_desde, models.Venta.fecha <= fecha_hasta)
+    cutoff_map = _cutoff_map_for_sucursales(db, sucursales_filtro) if modo_operativo else {}
+    use_op = modo_operativo and any(v is not None for v in cutoff_map.values())
+    fd_cal, fh_cal = (
+        operativa.widen_iso_range(fecha_desde, fecha_hasta) if use_op else (fecha_desde, fecha_hasta)
+    )
+    q = q.filter(models.Venta.fecha >= fd_cal, models.Venta.fecha <= fh_cal)
     q = q.options(
         load_only(
             models.Venta.sucursal_id,
@@ -1469,7 +1503,21 @@ def _ventas_en_rango(
             models.Venta.detalles,
         )
     )
-    return q.all()
+    rows = q.all()
+    if not use_op:
+        return rows
+    return [
+        v
+        for v in rows
+        if operativa.venta_en_rango_operativo(
+            getattr(v, "fecha", None),
+            getattr(v, "hora", None),
+            str(getattr(v, "sucursal_id", "") or ""),
+            fecha_desde,
+            fecha_hasta,
+            cutoff_map,
+        )
+    ]
 
 
 def _ventas_turno_en_rango(
@@ -1478,13 +1526,19 @@ def _ventas_turno_en_rango(
     fecha_desde: str,
     fecha_hasta: str,
     sucursales_filtro: Optional[List[str]],
+    modo_operativo: bool = False,
 ) -> List[models.VentaTurno]:
     q = db.query(models.VentaTurno).join(models.Sucursal, models.VentaTurno.sucursal_id == models.Sucursal.id)
 
     if sucursales_filtro is not None:
         q = q.filter(models.VentaTurno.sucursal_id.in_(sucursales_filtro))
 
-    q = q.filter(models.VentaTurno.fecha >= fecha_desde, models.VentaTurno.fecha <= fecha_hasta)
+    cutoff_map = _cutoff_map_for_sucursales(db, sucursales_filtro) if modo_operativo else {}
+    use_op = modo_operativo and any(v is not None for v in cutoff_map.values())
+    fd_cal, fh_cal = (
+        operativa.widen_iso_range(fecha_desde, fecha_hasta) if use_op else (fecha_desde, fecha_hasta)
+    )
+    q = q.filter(models.VentaTurno.fecha >= fd_cal, models.VentaTurno.fecha <= fh_cal)
     q = q.options(
         load_only(
             models.VentaTurno.sucursal_id,
@@ -1502,7 +1556,21 @@ def _ventas_turno_en_rango(
             models.VentaTurno.detalles,
         )
     )
-    return q.all()
+    rows = q.all()
+    if not use_op:
+        return rows
+    return [
+        t
+        for t in rows
+        if operativa.venta_en_rango_operativo(
+            getattr(t, "fecha", None),
+            getattr(t, "hora", None),
+            str(getattr(t, "sucursal_id", "") or ""),
+            fecha_desde,
+            fecha_hasta,
+            cutoff_map,
+        )
+    ]
 
 
 def _ventas_merged_para_resumen(
@@ -1511,15 +1579,18 @@ def _ventas_merged_para_resumen(
     fecha_desde: str,
     fecha_hasta: str,
     sucursales_filtro: Optional[List[str]],
+    modo_operativo: bool = False,
 ) -> List[Any]:
     """Histórico + turno en curso, sin duplicar ORDEN ya cerrado en histórico."""
-    hist = _ventas_en_rango(db, user, fecha_desde, fecha_hasta, sucursales_filtro)
+    hist = _ventas_en_rango(db, user, fecha_desde, fecha_hasta, sucursales_filtro, modo_operativo=modo_operativo)
     ordenes_hist: set[str] = set()
     for v in hist:
         o = (v.orden or "").strip()
         if o:
             ordenes_hist.add(o)
-    turno = _ventas_turno_en_rango(db, user, fecha_desde, fecha_hasta, sucursales_filtro)
+    turno = _ventas_turno_en_rango(
+        db, user, fecha_desde, fecha_hasta, sucursales_filtro, modo_operativo=modo_operativo
+    )
     turno_filtrado = [t for t in turno if (t.orden or "").strip() not in ordenes_hist]
     return list(hist) + list(turno_filtrado)
 
@@ -1973,6 +2044,7 @@ def _aggregate_productos_clases_pg(
     fecha_hasta: str,
     sucursales_filtro: Optional[List[str]],
     productos_limit: int,
+    modo_operativo: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     if db.get_bind().dialect.name != "postgresql":
         return [], []
@@ -1986,8 +2058,41 @@ def _aggregate_productos_clases_pg(
         params["sids"] = sucursales_filtro
         filt_v = "AND v.sucursal_id = ANY(:sids)"
         filt_t = "AND t.sucursal_id = ANY(:sids)"
-    sql = text(
-        f"""
+
+    cmap = _cutoff_map_for_sucursales(db, sucursales_filtro) if modo_operativo else {}
+    use_op = bool(modo_operativo and cmap and any(v is not None for v in cmap.values()))
+
+    if use_op:
+        fdw, fhw = operativa.widen_iso_range(fecha_desde, fecha_hasta)
+        params["fdw"] = fdw
+        params["fhw"] = fhw
+        fe_v = operativa.sql_fecha_operativa_expr("v", "s")
+        fe_t = operativa.sql_fecha_operativa_expr("t", "s_t")
+        fe_v2 = operativa.sql_fecha_operativa_expr("v2", "s2")
+        merged_sql = f"""
+        WITH merged AS (
+          SELECT v.sucursal_id, v.orden, v.detalles
+          FROM ventas v
+          JOIN sucursales s ON s.id = v.sucursal_id
+          WHERE v.fecha >= :fdw AND v.fecha <= :fhw {filt_v}
+            AND {fe_v} >= :fd AND {fe_v} <= :fh
+          UNION ALL
+          SELECT t.sucursal_id, t.orden, t.detalles
+          FROM ventas_turno t
+          JOIN sucursales s_t ON s_t.id = t.sucursal_id
+          WHERE t.fecha >= :fdw AND t.fecha <= :fhw {filt_t}
+            AND {fe_t} >= :fd AND {fe_t} <= :fh
+            AND NOT EXISTS (
+              SELECT 1 FROM ventas v2
+              JOIN sucursales s2 ON s2.id = v2.sucursal_id
+              WHERE v2.sucursal_id = t.sucursal_id AND v2.orden = t.orden
+                AND v2.fecha >= :fdw AND v2.fecha <= :fhw
+                AND {fe_v2} >= :fd AND {fe_v2} <= :fh
+            )
+        ),
+        """
+    else:
+        merged_sql = f"""
         WITH merged AS (
           SELECT v.sucursal_id, v.orden, v.detalles
           FROM ventas v
@@ -2002,6 +2107,10 @@ def _aggregate_productos_clases_pg(
                 AND v2.fecha >= :fd AND v2.fecha <= :fh
             )
         ),
+        """
+    sql = text(
+        merged_sql
+        + """
         lines AS (
           SELECT
             COALESCE(NULLIF(trim(d->>'descripcion'), ''), NULLIF(trim(d->>'codigo'), ''), 'Sin descripción') AS nombre,
@@ -2075,6 +2184,7 @@ def dashboard_resumen(
     sucursal_ids: Optional[List[str]] = Query(None),
     include_previous: bool = False,
     empty_selection: bool = False,
+    modo_operativo: bool = False,
     productos_limit: int = Query(1000, ge=1, le=5000),
     user: models.Usuario = Depends(get_current_user_dashboard),
     db: Session = Depends(get_db),
@@ -2083,6 +2193,8 @@ def dashboard_resumen(
     KPIs y series para el dashboard. Admin ve todas las sucursales; visor solo las asignadas en usuario_sucursales.
     `sucursal_ids` repetido en query filtra a varias sucursales; sin parámetro = todas las permitidas.
     `sucursal_id` (legacy) equivale a una sola sucursal si no hay `sucursal_ids`.
+    `modo_operativo=true`: filtra por día comercial usando `hora_corte_operativa_minutos` en sucursales con valor;
+    sucursales sin corte siguen por fecha calendario POS.
     """
     filtro = _dashboard_sucursales_filtro_ids(db, user, sucursal_id, sucursal_ids)
     if empty_selection:
@@ -2090,7 +2202,9 @@ def dashboard_resumen(
     if filtro is not None and len(filtro) == 0:
         ventas: List[Any] = []
     else:
-        ventas = _ventas_merged_para_resumen(db, user, fecha_desde, fecha_hasta, filtro)
+        ventas = _ventas_merged_para_resumen(
+            db, user, fecha_desde, fecha_hasta, filtro, modo_operativo=modo_operativo
+        )
 
     suc_map = _dashboard_sucursal_nombres_from_ventas(db, ventas)
     metodo_lu = _dashboard_metodo_alias_lookup_map(db)
@@ -2101,6 +2215,7 @@ def dashboard_resumen(
         fecha_hasta=fecha_hasta,
         sucursales_filtro=filtro,
         productos_limit=productos_limit,
+        modo_operativo=modo_operativo,
     )
     if productos_sql:
         out["top_productos"] = productos_sql
@@ -2112,7 +2227,9 @@ def dashboard_resumen(
         if filtro is not None and len(filtro) == 0:
             prev_ventas: List[Any] = []
         else:
-            prev_ventas = _ventas_merged_para_resumen(db, user, pd, ph, filtro)
+            prev_ventas = _ventas_merged_para_resumen(
+                db, user, pd, ph, filtro, modo_operativo=modo_operativo
+            )
         prev_suc = _dashboard_sucursal_nombres_from_ventas(db, prev_ventas)
         prev = _resumen_from_ventas(
             prev_ventas, sucursal_nombres_por_id=prev_suc, metodo_alias_lookup=metodo_lu
@@ -2144,7 +2261,14 @@ def list_sucursales_for_filter(
             .order_by(models.Sucursal.nombre)
             .all()
         )
-    return [{"id": s.id, "nombre": s.nombre} for s in rows]
+    return [
+        {
+            "id": s.id,
+            "nombre": s.nombre,
+            "hora_corte_operativa_minutos": s.hora_corte_operativa_minutos,
+        }
+        for s in rows
+    ]
 
 
 # ================================

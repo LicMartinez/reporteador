@@ -80,6 +80,10 @@ class SwissSucursalBrief(BaseModel):
     id: str
     nombre: str
     last_connection_at: Optional[str] = None
+    hora_corte_operativa_minutos: Optional[int] = Field(
+        default=None,
+        description="0..1439: día comercial; null = fecha calendario POS.",
+    )
 
     class Config:
         from_attributes = True
@@ -130,6 +134,12 @@ class SwissAdminCreateSucursalRequest(BaseModel):
 
 class SwissAdminUpdateSucursalRequest(BaseModel):
     sync_password: Optional[str] = Field(default=None, min_length=6, max_length=256)
+    hora_corte_operativa_minutos: Optional[int] = Field(
+        default=None,
+        ge=0,
+        le=1439,
+        description="Minutos desde medianoche; null en JSON limpia el corte.",
+    )
 
 
 class SwissAdminCreateDashboardUserRequest(BaseModel):

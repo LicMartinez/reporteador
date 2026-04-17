@@ -597,6 +597,49 @@ export default function SwissAdminPortal() {
     }
   }
 
+  function formatCorteMinutos(m: number | null | undefined): string {
+    if (m == null || m === undefined) return '';
+    const h = Math.floor(m / 60);
+    const mi = m % 60;
+    return `${String(h).padStart(2, '0')}:${String(mi).padStart(2, '0')}`;
+  }
+
+  async function onSetSucursalCorte(sucursalId: string, sucursalNombre: string, actual: number | null | undefined) {
+    const hint = formatCorteMinutos(actual ?? undefined) || 'vacío = sin corte';
+    const raw = window.prompt(
+      `Hora de corte operativo (HH:MM) para ${sucursalNombre}. Ventas entre medianoche y esta hora cuentan en el día anterior. Dejar vacío quita el corte.\nActual: ${hint}`,
+      formatCorteMinutos(actual ?? undefined) || ''
+    );
+    if (raw == null) return;
+    const t = raw.trim();
+    setBusy(true);
+    setErr(null);
+    try {
+      if (!t) {
+        await patchSwissSucursal(sucursalId, { hora_corte_operativa_minutos: null });
+      } else {
+        const m = /^(\d{1,2}):(\d{2})$/.exec(t);
+        if (!m) {
+          setErr('Formato de hora: HH:MM (ej. 06:00).');
+          setBusy(false);
+          return;
+        }
+        const mins = Number(m[1]) * 60 + Number(m[2]);
+        if (mins < 0 || mins > 1439 || Number(m[1]) > 23 || Number(m[2]) > 59) {
+          setErr('Hora fuera de rango.');
+          setBusy(false);
+          return;
+        }
+        await patchSwissSucursal(sucursalId, { hora_corte_operativa_minutos: mins });
+      }
+      await loadAll();
+    } catch {
+      setErr('No se pudo guardar la hora de corte.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function onDeleteSucursal(sucursalId: string, sucursalNombre: string) {
     const ok = window.confirm(
       `¿Eliminar sucursal ${sucursalNombre}?\nSe eliminarán histórico, turno, logs y asignaciones relacionadas.`
@@ -962,6 +1005,14 @@ export default function SwissAdminPortal() {
                           <p className="text-xs text-slate-500">
                             Última conexión: {s.last_connection_at ? new Date(s.last_connection_at).toLocaleString() : '—'}
                           </p>
+                          <p className="text-xs text-slate-600 mt-1">
+                            Corte operativo:{' '}
+                            <span className="font-mono">
+                              {s.hora_corte_operativa_minutos != null
+                                ? formatCorteMinutos(s.hora_corte_operativa_minutos)
+                                : '— (día calendario)'}
+                            </span>
+                          </p>
                         </div>
                         <button
                           type="button"
@@ -978,6 +1029,13 @@ export default function SwissAdminPortal() {
                           className="px-3 py-2 rounded-xl text-sm font-semibold border border-blue-600 text-blue-900 bg-white hover:bg-blue-50 transition"
                         >
                           Cambiar contraseña
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void onSetSucursalCorte(s.id, s.nombre, s.hora_corte_operativa_minutos)}
+                          className="px-3 py-2 rounded-xl text-sm font-semibold border border-slate-400 text-slate-800 bg-white hover:bg-slate-50 transition"
+                        >
+                          Hora corte operativo
                         </button>
                         <button
                           type="button"

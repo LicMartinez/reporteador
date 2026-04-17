@@ -147,6 +147,7 @@ export type SwissSucursalBrief = {
   id: string;
   nombre: string;
   last_connection_at?: string | null;
+  hora_corte_operativa_minutos?: number | null;
 };
 
 export type SwissSucursalLogsItem = {
@@ -200,7 +201,10 @@ export async function createSwissSucursal(nombre: string, sync_password: string)
   return data;
 }
 
-export async function patchSwissSucursal(sucursal_id: string, body: { sync_password?: string }) {
+export async function patchSwissSucursal(
+  sucursal_id: string,
+  body: { sync_password?: string; hora_corte_operativa_minutos?: number | null }
+) {
   const { data } = await api.patch<SwissSucursalBrief>(`/swiss-admin/sucursales/${sucursal_id}`, body);
   return data;
 }
@@ -386,11 +390,17 @@ export async function fetchResumen(
   fechaDesde: string,
   fechaHasta: string,
   sucursalIds?: string[] | undefined,
-  opts?: { includePrevious?: boolean; emptySelection?: boolean; productosLimit?: number }
+  opts?: {
+    includePrevious?: boolean;
+    emptySelection?: boolean;
+    productosLimit?: number;
+    modoOperativo?: boolean;
+  }
 ) {
   const sp = new URLSearchParams();
   sp.set('fecha_desde', fechaDesde);
   sp.set('fecha_hasta', fechaHasta);
+  if (opts?.modoOperativo) sp.set('modo_operativo', 'true');
   if (opts?.includePrevious) sp.set('include_previous', 'true');
   if (opts?.emptySelection) sp.set('empty_selection', 'true');
   if (typeof opts?.productosLimit === 'number' && opts.productosLimit > 0) {
@@ -419,8 +429,14 @@ export function getApiErrorMessage(err: unknown): string {
   return 'Error inesperado al cargar datos.';
 }
 
+export type DashboardSucursalFilterItem = {
+  id: string;
+  nombre: string;
+  hora_corte_operativa_minutos?: number | null;
+};
+
 export async function fetchSucursalesFilter() {
-  const { data } = await api.get<{ id: string; nombre: string }[]>('/dashboard/sucursales');
+  const { data } = await api.get<DashboardSucursalFilterItem[]>('/dashboard/sucursales');
   return data;
 }
 
