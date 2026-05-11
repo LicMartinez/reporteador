@@ -27,6 +27,9 @@ function operationalDayAnchor(cutoff: number): Date {
   return now;
 }
 
+/** Default cutoff: 06:00 AM (360 minutos). Siempre se aplica si la sucursal no tiene uno explícito. */
+const DEFAULT_CORTE_MINUTOS = 360;
+
 function operationalCutoffForSelection(
   sucs: DashboardSucursalFilterItem[],
   selectedIds: string[]
@@ -34,12 +37,12 @@ function operationalCutoffForSelection(
   if (!sucs.length) return null;
   const targets = selectedIds.length ? sucs.filter((s) => selectedIds.includes(s.id)) : sucs;
   if (!targets.length) return null;
-  const vals = targets.map((s) => s.hora_corte_operativa_minutos);
-  if (vals.some((v) => v == null || v === undefined)) return null;
-  const nums = vals as number[];
-  const uniq = new Set(nums);
-  if (uniq.size !== 1) return null;
-  return nums[0];
+  // Usa el corte explícito de la sucursal o el default (360 = 06:00)
+  const vals = targets.map((s) => s.hora_corte_operativa_minutos ?? DEFAULT_CORTE_MINUTOS);
+  const uniq = new Set(vals);
+  // Si todas las sucursales seleccionadas comparten el mismo corte, lo usamos
+  if (uniq.size !== 1) return DEFAULT_CORTE_MINUTOS;
+  return vals[0];
 }
 
 function computeRange(
@@ -155,7 +158,7 @@ export function DashboardShellProvider({ children }: { children: ReactNode }) {
   const [customHasta, setCustomHasta] = useState(() => format(new Date(), 'yyyy-MM-dd'));
   const [selectedSucursalIds, setSelectedSucursalIds] = useState<string[]>([]);
   const [sucursales, setSucursales] = useState<DashboardSucursalFilterItem[]>([]);
-  const [diaOperativo, setDiaOperativo] = useState(false);
+  const [diaOperativo, setDiaOperativo] = useState(true);
   const [data, setData] = useState<Resumen | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);

@@ -112,8 +112,10 @@ class Venta(Base):
     sucursal_id = Column(String, ForeignKey("sucursales.id"), index=True)
     orden = Column(String, index=True)
     factura = Column(String)
-    fecha = Column(String, index=True) # ISO "2026-03-24"
+    fecha = Column(String, index=True) # ISO "2026-03-24" (fecha calendario POS)
     hora = Column(String)
+    # Fecha de negocio calculada: si hora < corte (default 06:00), es el día anterior.
+    fecha_operacion = Column(String, index=True, nullable=True)
     total_pagado = Column(Float)
     subtotal = Column(Float)
     metodo_pago_tarjeta = Column(String)
@@ -146,6 +148,8 @@ class VentaTurno(Base):
     factura = Column(String)
     fecha = Column(String, index=True)
     hora = Column(String)
+    # Fecha de negocio calculada: si hora < corte (default 06:00), es el día anterior.
+    fecha_operacion = Column(String, index=True, nullable=True)
     total_pagado = Column(Float)
     subtotal = Column(Float)
     metodo_pago_tarjeta = Column(String)

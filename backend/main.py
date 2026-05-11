@@ -1475,23 +1475,29 @@ def _ventas_en_rango(
     sucursales_filtro: Optional[List[str]],
     modo_operativo: bool = False,
 ) -> List[models.Venta]:
-    q = db.query(models.Venta).join(models.Sucursal, models.Venta.sucursal_id == models.Sucursal.id)
+    q = db.query(models.Venta)
 
     if sucursales_filtro is not None:
         q = q.filter(models.Venta.sucursal_id.in_(sucursales_filtro))
 
-    cutoff_map = _cutoff_map_for_sucursales(db, sucursales_filtro) if modo_operativo else {}
-    use_op = modo_operativo and any(v is not None for v in cutoff_map.values())
-    fd_cal, fh_cal = (
-        operativa.widen_iso_range(fecha_desde, fecha_hasta) if use_op else (fecha_desde, fecha_hasta)
-    )
-    q = q.filter(models.Venta.fecha >= fd_cal, models.Venta.fecha <= fh_cal)
+    if modo_operativo:
+        # Usa fecha_operacion (pre-calculada en sync) para filtrar directamente en SQL.
+        # Fallback: si fecha_operacion es NULL (datos legacy), usa la lógica antigua.
+        q = q.filter(
+            func.coalesce(models.Venta.fecha_operacion, models.Venta.fecha).between(
+                fecha_desde, fecha_hasta
+            )
+        )
+    else:
+        q = q.filter(models.Venta.fecha >= fecha_desde, models.Venta.fecha <= fecha_hasta)
+
     q = q.options(
         load_only(
             models.Venta.sucursal_id,
             models.Venta.orden,
             models.Venta.fecha,
             models.Venta.hora,
+            models.Venta.fecha_operacion,
             models.Venta.total_pagado,
             models.Venta.monto_efectivo,
             models.Venta.monto_tarjeta,
@@ -1503,21 +1509,7 @@ def _ventas_en_rango(
             models.Venta.detalles,
         )
     )
-    rows = q.all()
-    if not use_op:
-        return rows
-    return [
-        v
-        for v in rows
-        if operativa.venta_en_rango_operativo(
-            getattr(v, "fecha", None),
-            getattr(v, "hora", None),
-            str(getattr(v, "sucursal_id", "") or ""),
-            fecha_desde,
-            fecha_hasta,
-            cutoff_map,
-        )
-    ]
+    return q.all()
 
 
 def _ventas_turno_en_rango(
@@ -1528,23 +1520,28 @@ def _ventas_turno_en_rango(
     sucursales_filtro: Optional[List[str]],
     modo_operativo: bool = False,
 ) -> List[models.VentaTurno]:
-    q = db.query(models.VentaTurno).join(models.Sucursal, models.VentaTurno.sucursal_id == models.Sucursal.id)
+    q = db.query(models.VentaTurno)
 
     if sucursales_filtro is not None:
         q = q.filter(models.VentaTurno.sucursal_id.in_(sucursales_filtro))
 
-    cutoff_map = _cutoff_map_for_sucursales(db, sucursales_filtro) if modo_operativo else {}
-    use_op = modo_operativo and any(v is not None for v in cutoff_map.values())
-    fd_cal, fh_cal = (
-        operativa.widen_iso_range(fecha_desde, fecha_hasta) if use_op else (fecha_desde, fecha_hasta)
-    )
-    q = q.filter(models.VentaTurno.fecha >= fd_cal, models.VentaTurno.fecha <= fh_cal)
+    if modo_operativo:
+        # Usa fecha_operacion (pre-calculada en sync) para filtrar directamente en SQL.
+        q = q.filter(
+            func.coalesce(models.VentaTurno.fecha_operacion, models.VentaTurno.fecha).between(
+                fecha_desde, fecha_hasta
+            )
+        )
+    else:
+        q = q.filter(models.VentaTurno.fecha >= fecha_desde, models.VentaTurno.fecha <= fecha_hasta)
+
     q = q.options(
         load_only(
             models.VentaTurno.sucursal_id,
             models.VentaTurno.orden,
             models.VentaTurno.fecha,
             models.VentaTurno.hora,
+            models.VentaTurno.fecha_operacion,
             models.VentaTurno.total_pagado,
             models.VentaTurno.monto_efectivo,
             models.VentaTurno.monto_tarjeta,
@@ -1556,21 +1553,7 @@ def _ventas_turno_en_rango(
             models.VentaTurno.detalles,
         )
     )
-    rows = q.all()
-    if not use_op:
-        return rows
-    return [
-        t
-        for t in rows
-        if operativa.venta_en_rango_operativo(
-            getattr(t, "fecha", None),
-            getattr(t, "hora", None),
-            str(getattr(t, "sucursal_id", "") or ""),
-            fecha_desde,
-            fecha_hasta,
-            cutoff_map,
-        )
-    ]
+    return q.all()
 
 
 def _ventas_merged_para_resumen(
@@ -1777,10 +1760,11 @@ def _resumen_from_ventas(
         h = (v.hora or "").strip()[:5] or "00:00"
         por_hora[h] += float(v.total_pagado or 0)
 
-        fstr = (v.fecha or "").strip()[:10]
+        # Usa fecha_operacion para determinar el día de la semana (día de negocio)
+        fstr = (getattr(v, "fecha_operacion", None) or "").strip() or (v.fecha or "").strip()[:10]
         if fstr:
             try:
-                wd = date.fromisoformat(fstr).weekday()
+                wd = date.fromisoformat(fstr[:10]).weekday()
             except ValueError:
                 wd = None
             if wd is not None:
@@ -1813,7 +1797,8 @@ def _resumen_from_ventas(
 
     por_dia_acc: dict[str, dict[str, Any]] = {}
     for v in ventas:
-        f = (v.fecha or "").strip() or ""
+        # Usa fecha_operacion (día de negocio) si está disponible; fallback a fecha calendario
+        f = (getattr(v, "fecha_operacion", None) or "").strip() or (v.fecha or "").strip() or ""
         ef, tar = _montos_efectivo_tarjeta_row(v)
         if f not in por_dia_acc:
             por_dia_acc[f] = {
@@ -2059,35 +2044,24 @@ def _aggregate_productos_clases_pg(
         filt_v = "AND v.sucursal_id = ANY(:sids)"
         filt_t = "AND t.sucursal_id = ANY(:sids)"
 
-    cmap = _cutoff_map_for_sucursales(db, sucursales_filtro) if modo_operativo else {}
-    use_op = bool(modo_operativo and cmap and any(v is not None for v in cmap.values()))
-
-    if use_op:
-        fdw, fhw = operativa.widen_iso_range(fecha_desde, fecha_hasta)
-        params["fdw"] = fdw
-        params["fhw"] = fhw
-        fe_v = operativa.sql_fecha_operativa_expr("v", "s")
-        fe_t = operativa.sql_fecha_operativa_expr("t", "s_t")
-        fe_v2 = operativa.sql_fecha_operativa_expr("v2", "s2")
+    if modo_operativo:
+        # Usa la columna pre-calculada fecha_operacion (con fallback a fecha para datos legacy)
         merged_sql = f"""
         WITH merged AS (
           SELECT v.sucursal_id, v.orden, v.detalles
           FROM ventas v
-          JOIN sucursales s ON s.id = v.sucursal_id
-          WHERE v.fecha >= :fdw AND v.fecha <= :fhw {filt_v}
-            AND {fe_v} >= :fd AND {fe_v} <= :fh
+          WHERE COALESCE(NULLIF(v.fecha_operacion, ''), v.fecha) >= :fd
+            AND COALESCE(NULLIF(v.fecha_operacion, ''), v.fecha) <= :fh {filt_v}
           UNION ALL
           SELECT t.sucursal_id, t.orden, t.detalles
           FROM ventas_turno t
-          JOIN sucursales s_t ON s_t.id = t.sucursal_id
-          WHERE t.fecha >= :fdw AND t.fecha <= :fhw {filt_t}
-            AND {fe_t} >= :fd AND {fe_t} <= :fh
+          WHERE COALESCE(NULLIF(t.fecha_operacion, ''), t.fecha) >= :fd
+            AND COALESCE(NULLIF(t.fecha_operacion, ''), t.fecha) <= :fh {filt_t}
             AND NOT EXISTS (
               SELECT 1 FROM ventas v2
-              JOIN sucursales s2 ON s2.id = v2.sucursal_id
               WHERE v2.sucursal_id = t.sucursal_id AND v2.orden = t.orden
-                AND v2.fecha >= :fdw AND v2.fecha <= :fhw
-                AND {fe_v2} >= :fd AND {fe_v2} <= :fh
+                AND COALESCE(NULLIF(v2.fecha_operacion, ''), v2.fecha) >= :fd
+                AND COALESCE(NULLIF(v2.fecha_operacion, ''), v2.fecha) <= :fh
             )
         ),
         """
@@ -2447,14 +2421,18 @@ def _venta_row_dict(
     sucursal_id: str,
     orden: str,
     kw: dict[str, Any],
+    corte_minutos: Optional[int] = None,
 ) -> dict[str, Any]:
+    fecha_n = kw.get("fecha")
+    hora_n = kw.get("hora")
     return {
         "id": pk,
         "sucursal_id": sucursal_id,
         "orden": orden,
         "factura": kw.get("factura"),
-        "fecha": kw.get("fecha"),
-        "hora": kw.get("hora"),
+        "fecha": fecha_n,
+        "hora": hora_n,
+        "fecha_operacion": operativa.calcular_fecha_operacion(fecha_n, hora_n, corte_minutos),
         "total_pagado": kw.get("total_pagado", 0),
         "subtotal": kw.get("subtotal", 0),
         "metodo_pago_tarjeta": kw.get("metodo_pago_tarjeta", "N/A"),
@@ -2657,7 +2635,81 @@ def sync_last_orden(
     return {"last_orden": str(int(mx)), "sucursal": sucursal.nombre}
 
 
-@app.post("/sync/upload/{sucursal_nombre}", tags=["Sincronización"])
+@app.post("/swiss-admin/backfill-fecha-operacion", tags=["SwissAdmin"])
+def swiss_admin_backfill_fecha_operacion(
+    user: models.Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    batch_size: int = Query(5000, ge=100, le=50000),
+):
+    """
+    Backfill: calcula fecha_operacion para registros existentes que no la tienen.
+    Usa hora_corte_operativa_minutos de la sucursal (o DEFAULT 360 = 06:00).
+    Ejecutar una vez tras el despliegue; es idempotente.
+    """
+    _require_admin(user)
+
+    # Obtener mapa de cortes por sucursal
+    sucs = db.query(models.Sucursal.id, models.Sucursal.hora_corte_operativa_minutos).all()
+    corte_map = {str(s[0]): s[1] for s in sucs}
+
+    updated_ventas = 0
+    updated_turno = 0
+
+    # Backfill ventas (en lotes para no bloquear)
+    while True:
+        rows = (
+            db.query(models.Venta.id, models.Venta.sucursal_id, models.Venta.fecha, models.Venta.hora)
+            .filter(
+                (models.Venta.fecha_operacion == None) | (models.Venta.fecha_operacion == "")  # noqa: E711
+            )
+            .limit(batch_size)
+            .all()
+        )
+        if not rows:
+            break
+        for r in rows:
+            corte = corte_map.get(str(r.sucursal_id))
+            fo = operativa.calcular_fecha_operacion(r.fecha, r.hora, corte)
+            db.execute(
+                update(models.Venta)
+                .where(models.Venta.id == r.id)
+                .values(fecha_operacion=fo)
+            )
+        db.commit()
+        updated_ventas += len(rows)
+        if len(rows) < batch_size:
+            break
+
+    # Backfill ventas_turno
+    while True:
+        rows = (
+            db.query(models.VentaTurno.id, models.VentaTurno.sucursal_id, models.VentaTurno.fecha, models.VentaTurno.hora)
+            .filter(
+                (models.VentaTurno.fecha_operacion == None) | (models.VentaTurno.fecha_operacion == "")  # noqa: E711
+            )
+            .limit(batch_size)
+            .all()
+        )
+        if not rows:
+            break
+        for r in rows:
+            corte = corte_map.get(str(r.sucursal_id))
+            fo = operativa.calcular_fecha_operacion(r.fecha, r.hora, corte)
+            db.execute(
+                update(models.VentaTurno)
+                .where(models.VentaTurno.id == r.id)
+                .values(fecha_operacion=fo)
+            )
+        db.commit()
+        updated_turno += len(rows)
+        if len(rows) < batch_size:
+            break
+
+    return {
+        "status": "ok",
+        "ventas_actualizadas": updated_ventas,
+        "ventas_turno_actualizadas": updated_turno,
+    }@app.post("/sync/upload/{sucursal_nombre}", tags=["Sincronización"])
 def upload_sync_data(
     sucursal_nombre: str,
     payload: dict,
@@ -2734,7 +2786,7 @@ def upload_sync_data(
             kw = _sync_payload_to_venta_kwargs(v)
             kw["fecha"] = fecha_n
             kw["hora"] = hora_n
-            row = _venta_row_dict(uuid_compuesto, sucursal.id, orden, kw)
+            row = _venta_row_dict(uuid_compuesto, sucursal.id, orden, kw, sucursal.hora_corte_operativa_minutos)
             if _insert_venta_idempotent(db, row):
                 nuevas_inserciones += 1
                 db.query(models.VentaTurno).filter(
@@ -2768,13 +2820,18 @@ def upload_sync_data(
                     continue
                 tid = f"{sucursal.id}_{orden_t}"
                 kw_t = _sync_payload_to_venta_kwargs(v)
+                fecha_t = _sync_normalize_fecha(kw_t.get("fecha"))
+                hora_t = _sync_normalize_hora(kw_t.get("hora"))
                 row_t = {
                     "id": tid,
                     "sucursal_id": sucursal.id,
                     "orden": orden_t,
                     "factura": kw_t.get("factura"),
-                    "fecha": _sync_normalize_fecha(kw_t.get("fecha")),
-                    "hora": _sync_normalize_hora(kw_t.get("hora")),
+                    "fecha": fecha_t,
+                    "hora": hora_t,
+                    "fecha_operacion": operativa.calcular_fecha_operacion(
+                        fecha_t, hora_t, sucursal.hora_corte_operativa_minutos
+                    ),
                     "total_pagado": kw_t.get("total_pagado", 0),
                     "subtotal": kw_t.get("subtotal", 0),
                     "metodo_pago_tarjeta": kw_t.get("metodo_pago_tarjeta", "N/A"),

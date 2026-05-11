@@ -57,12 +57,28 @@ def ensure_schema_columns() -> None:
             out.append(f"ALTER TABLE {table} ADD COLUMN mesero_nombre VARCHAR")
         if "propinas" not in cols:
             out.append(f"ALTER TABLE {table} ADD COLUMN propinas {propinas_type}")
+        if "fecha_operacion" not in cols:
+            out.append(f"ALTER TABLE {table} ADD COLUMN fecha_operacion VARCHAR")
         return out
 
     for tbl in ("ventas", "ventas_turno"):
         for sql in statements_for_table(tbl):
             with engine.begin() as conn:
                 conn.execute(text(sql))
+
+    # Crear índice en fecha_operacion si no existe (para queries rápidas por día de negocio)
+    if engine.dialect.name == "postgresql":
+        for tbl in ("ventas", "ventas_turno"):
+            if tbl in names:
+                idx_name = f"ix_{tbl}_fecha_operacion"
+                existing_indexes = {idx["name"] for idx in insp.get_indexes(tbl)}
+                if idx_name not in existing_indexes:
+                    cols = {c["name"] for c in insp.get_columns(tbl)}
+                    if "fecha_operacion" in cols:
+                        with engine.begin() as conn:
+                            conn.execute(text(
+                                f"CREATE INDEX IF NOT EXISTS {idx_name} ON {tbl} (fecha_operacion)"
+                            ))
 
     if "sucursales" in names:
         scols = {c["name"] for c in insp.get_columns("sucursales")}
