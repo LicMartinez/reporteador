@@ -183,7 +183,7 @@ export function DashboardShellProvider({ children }: { children: ReactNode }) {
     [preset, customDesde, customHasta, diaOperativo, operationalCutoffMinutes]
   );
 
-  const modoOperativoFetch = diaOperativo && operationalCutoffMinutes != null;
+  const modoOperativoFetch = true; // Siempre usar fecha_operacion (día de negocio)
 
   const toggleSucursalId = useCallback((id: string) => {
     setSelectedSucursalIds((prev) => {

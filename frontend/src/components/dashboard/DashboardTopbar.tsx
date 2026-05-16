@@ -37,9 +37,6 @@ export function DashboardTopbar() {
     sucursales,
     fechaDesde,
     fechaHasta,
-    diaOperativo,
-    setDiaOperativo,
-    operationalCutoffMinutes,
     loading,
     reload,
   } = useDashboardShell();
@@ -64,20 +61,7 @@ export function DashboardTopbar() {
     return () => document.removeEventListener('mousedown', onDoc);
   }, [sucOpen]);
 
-  const periodLabel = useMemo(() => {
-    const base = `${fechaDesde} — ${fechaHasta}`;
-    if (diaOperativo && operationalCutoffMinutes != null) {
-      const h = Math.floor(operationalCutoffMinutes / 60);
-      const m = operationalCutoffMinutes % 60;
-      const hh = String(h).padStart(2, '0');
-      const mm = String(m).padStart(2, '0');
-      return `${base} · día operativo (corte ${hh}:${mm})`;
-    }
-    return base;
-  }, [fechaDesde, fechaHasta, diaOperativo, operationalCutoffMinutes]);
-
-  const canDiaOperativo = operationalCutoffMinutes != null;
-
+  const periodLabel = `${fechaDesde} — ${fechaHasta}`;
   const allowedIds = useMemo(() => sucursales.map((s) => s.id), [sucursales]);
   const allSelected = sameSelection(allowedIds, selectedSucursalIds);
 
@@ -171,24 +155,7 @@ export function DashboardTopbar() {
             </select>
           </div>
 
-          <label
-            className={`flex items-center gap-2 rounded-xl border px-3 py-2 text-sm shadow-sm ${
-              canDiaOperativo ? 'cursor-pointer border-slate-200 bg-white' : 'cursor-not-allowed border-slate-100 bg-slate-50 text-slate-400'
-            }`}
-            title={
-              canDiaOperativo
-                ? 'Filtra por día comercial y presets “Hoy” según corte (todas las sucursales visibles deben compartir el mismo corte).'
-                : 'Configura la misma hora de corte en todas las sucursales seleccionadas (Swiss Admin) para habilitar.'
-            }
-          >
-            <input
-              type="checkbox"
-              checked={diaOperativo}
-              disabled={!canDiaOperativo}
-              onChange={(e) => setDiaOperativo(e.target.checked)}
-            />
-            <span className="font-medium text-slate-700">Día operativo</span>
-          </label>
+
 
           {preset === 'personalizado' && (
             <div className="flex flex-wrap items-center gap-2">
@@ -328,33 +295,7 @@ export function DashboardTopbar() {
                 </div>
               )}
 
-              <div className="space-y-3">
-                <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Ajustes</label>
-                <label
-                  className={`flex items-center justify-between gap-2 rounded-xl border p-4 transition-all ${
-                    canDiaOperativo 
-                      ? 'border-slate-200 bg-white shadow-sm cursor-pointer hover:border-blue-200' 
-                      : 'border-slate-100 bg-slate-50 text-slate-400 opacity-60'
-                  }`}
-                >
-                  <span className="text-sm font-semibold text-slate-700">Día operativo</span>
-                  <div className="relative inline-flex items-center cursor-pointer">
-                    <input
-                      type="checkbox"
-                      className="sr-only peer"
-                      checked={diaOperativo}
-                      disabled={!canDiaOperativo}
-                      onChange={(e) => setDiaOperativo(e.target.checked)}
-                    />
-                    <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
-                  </div>
-                </label>
-                {!canDiaOperativo && (
-                  <p className="text-[10px] text-slate-400 leading-tight px-1">
-                    Habilita esta opción configurando el mismo corte en Swiss Admin.
-                  </p>
-                )}
-              </div>
+
             </div>
 
             <div className="p-5 border-t border-slate-100 bg-slate-50 sticky bottom-0">
