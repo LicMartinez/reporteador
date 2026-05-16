@@ -2709,7 +2709,10 @@ def swiss_admin_backfill_fecha_operacion(
         "status": "ok",
         "ventas_actualizadas": updated_ventas,
         "ventas_turno_actualizadas": updated_turno,
-    }@app.post("/sync/upload/{sucursal_nombre}", tags=["Sincronización"])
+    }
+
+
+@app.post("/sync/upload/{sucursal_nombre}", tags=["Sincronización"])
 def upload_sync_data(
     sucursal_nombre: str,
     payload: dict,
