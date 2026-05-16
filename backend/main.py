@@ -103,6 +103,45 @@ def _require_maintenance_access(user: models.Usuario) -> None:
         )
 
 
+def _recalcular_fecha_operacion_sucursal(db: Session, sucursal_id: str, corte_minutos: int | None) -> None:
+    """
+    Recalcula fecha_operacion para todas las ventas y ventas_turno de una sucursal.
+    Se ejecuta cuando el admin cambia la hora de corte desde el portal.
+    """
+    from . import operativa as _op
+
+    # Recalcular ventas históricas
+    rows_v = (
+        db.query(models.Venta.id, models.Venta.fecha, models.Venta.hora)
+        .filter(models.Venta.sucursal_id == sucursal_id)
+        .yield_per(5000)
+        .all()
+    )
+    for r in rows_v:
+        fo = _op.calcular_fecha_operacion(r.fecha, r.hora, corte_minutos)
+        db.execute(
+            update(models.Venta).where(models.Venta.id == r.id).values(fecha_operacion=fo)
+        )
+
+    # Recalcular ventas_turno
+    rows_t = (
+        db.query(models.VentaTurno.id, models.VentaTurno.fecha, models.VentaTurno.hora)
+        .filter(models.VentaTurno.sucursal_id == sucursal_id)
+        .all()
+    )
+    for r in rows_t:
+        fo = _op.calcular_fecha_operacion(r.fecha, r.hora, corte_minutos)
+        db.execute(
+            update(models.VentaTurno).where(models.VentaTurno.id == r.id).values(fecha_operacion=fo)
+        )
+
+    db.commit()
+    logger.info(
+        "Recalculada fecha_operacion para sucursal %s: %d ventas + %d turno (corte=%s)",
+        sucursal_id, len(rows_v), len(rows_t), corte_minutos,
+    )
+
+
 def _purge_ventas_importadas(
     db: Session,
     sucursal: models.Sucursal,
@@ -387,9 +426,18 @@ def swiss_admin_update_sucursal(
     if "sync_password" in payload and payload["sync_password"]:
         suc.sync_password_hash = hash_password(payload["sync_password"])
     if "hora_corte_operativa_minutos" in body.model_fields_set:
+        old_corte = suc.hora_corte_operativa_minutos
         suc.hora_corte_operativa_minutos = body.hora_corte_operativa_minutos
-    db.commit()
-    db.refresh(suc)
+        new_corte = suc.hora_corte_operativa_minutos
+        db.commit()
+        db.refresh(suc)
+
+        # Recalcular fecha_operacion si el corte cambió
+        if old_corte != new_corte:
+            _recalcular_fecha_operacion_sucursal(db, suc.id, new_corte)
+    else:
+        db.commit()
+        db.refresh(suc)
     return schemas.SwissSucursalBrief(
         id=suc.id,
         nombre=suc.nombre,
