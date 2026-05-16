@@ -2798,9 +2798,8 @@ def upload_sync_data(
                 ).delete(synchronize_session=False)
 
         if "turno_actual" in payload:
-            db.query(models.VentaTurno).filter(models.VentaTurno.sucursal_id == sucursal.id).delete(
-                synchronize_session=False
-            )
+            # Merge inteligente: no borrar ventas de turnos anteriores que aún no están en histórico.
+            # Solo reemplazar las que coinciden con el snapshot actual o agregar nuevas.
             turno_proc, turno_dupes = _dedupe_turno_por_orden(payload.get("turno_actual") or [])
             if turno_dupes:
                 logger.info(
@@ -2808,6 +2807,38 @@ def upload_sync_data(
                     sucursal.nombre,
                     turno_dupes,
                 )
+
+            # Obtener ORDENes del snapshot actual
+            snapshot_ordenes = {str(v.get("orden", "")).strip() for v in turno_proc if str(v.get("orden", "")).strip()}
+
+            # Borrar solo las filas de ventas_turno cuyo ORDEN está en el snapshot (se van a reemplazar)
+            # o que ya existen en ventas históricas (ya no necesitan estar en turno)
+            if snapshot_ordenes:
+                db.query(models.VentaTurno).filter(
+                    models.VentaTurno.sucursal_id == sucursal.id,
+                    models.VentaTurno.orden.in_(snapshot_ordenes),
+                ).delete(synchronize_session=False)
+
+            # También limpiar de ventas_turno cualquier ORDEN que ya esté en ventas históricas
+            existing_turno_ordenes = [
+                r[0] for r in db.query(models.VentaTurno.orden)
+                .filter(models.VentaTurno.sucursal_id == sucursal.id)
+                .all()
+            ]
+            if existing_turno_ordenes:
+                already_in_hist = [
+                    r[0] for r in db.query(models.Venta.orden)
+                    .filter(
+                        models.Venta.sucursal_id == sucursal.id,
+                        models.Venta.orden.in_(existing_turno_ordenes),
+                    )
+                    .all()
+                ]
+                if already_in_hist:
+                    db.query(models.VentaTurno).filter(
+                        models.VentaTurno.sucursal_id == sucursal.id,
+                        models.VentaTurno.orden.in_(already_in_hist),
+                    ).delete(synchronize_session=False)
             for v in turno_proc:
                 orden_t = str(v.get("orden", "")).strip()
                 if not orden_t:
