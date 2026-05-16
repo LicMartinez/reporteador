@@ -4,6 +4,8 @@ import { DashboardShellProvider, useDashboardShell } from '../../context/Dashboa
 import { changePassword, exportTop10Csv } from '../../api/client';
 import { DashboardSidebar } from './DashboardSidebar';
 import { DashboardTopbar } from './DashboardTopbar';
+import { MobileBottomNav } from './MobileBottomNav';
+import { MobileFilterBar } from './MobileFilterBar';
 import { Menu } from 'lucide-react';
 
 function DashboardLayoutInner() {
@@ -17,8 +19,9 @@ function DashboardLayoutInner() {
 
   return (
     <div className="min-h-screen bg-slate-100 font-sans text-slate-900">
+      {/* Desktop sidebar toggle - hidden on mobile (we use bottom nav instead) */}
       <div className="md:hidden flex items-center justify-between px-4 py-3 bg-[#0f172a] text-white">
-        <span className="font-bold">SwissTools Pos</span>
+        <span className="font-bold text-sm">SwissTools Pos</span>
         <button
           type="button"
           aria-label="Menú"
@@ -67,14 +70,17 @@ function DashboardLayoutInner() {
           />
         </div>
         <div className="flex-1 flex flex-col min-w-0">
+          <MobileFilterBar />
           <DashboardTopbar />
-          <main className="flex-1 p-3 sm:p-4 md:p-8 overflow-auto">
+          <main className="flex-1 p-3 sm:p-4 md:p-8 pb-20 md:pb-8 overflow-auto">
             {exportErr && <p className="mb-4 text-sm text-red-600">{exportErr}</p>}
             {err && <p className="mb-4 text-sm text-red-600">{err}</p>}
             <Outlet />
           </main>
         </div>
       </div>
+
+      <MobileBottomNav />
 
       {pwOpen && <PasswordModal onClose={() => setPwOpen(false)} pwOld={pwOld} setPwOld={setPwOld} pwNew={pwNew} setPwNew={setPwNew} pwErr={pwErr} setPwErr={setPwErr} />}
     </div>

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation } from 'react-router-dom';
+import { createPortal } from 'react-dom';
 import { Calendar, ChevronDown, Filter, RefreshCw, X } from 'lucide-react';
 import { useDashboardShell, type DatePreset } from '../../context/DashboardShellContext';
 
@@ -50,9 +51,14 @@ export function DashboardTopbar() {
   useEffect(() => {
     if (!sucOpen) return;
     const onDoc = (e: MouseEvent) => {
-      if (sucWrapRef.current && !sucWrapRef.current.contains(e.target as Node)) {
-        setSucOpen(false);
-      }
+      // Si el click fue dentro del wrapper de desktop, no cerrar
+      if (sucWrapRef.current && sucWrapRef.current.contains(e.target as Node)) return;
+      
+      // Si el click fue dentro del portal móvil, no cerrar
+      const portal = document.getElementById('mobile-filters-portal');
+      if (portal && portal.contains(e.target as Node)) return;
+
+      setSucOpen(false);
     };
     document.addEventListener('mousedown', onDoc);
     return () => document.removeEventListener('mousedown', onDoc);
@@ -223,78 +229,135 @@ export function DashboardTopbar() {
           </button>
         </div>
       </div>
-      {mobileFiltersOpen && (
-        <div className="fixed inset-0 z-[70] md:hidden">
-          <div className="absolute inset-0 bg-black/40" onClick={() => setMobileFiltersOpen(false)} />
-          <div className="absolute right-0 top-0 h-full w-[88%] max-w-sm bg-white border-l border-slate-200 p-4 overflow-y-auto">
-            <div className="mb-4 flex items-center justify-between">
-              <h3 className="text-base font-semibold text-slate-900">Filtros</h3>
-              <button type="button" onClick={() => setMobileFiltersOpen(false)} className="rounded-lg p-1 text-slate-500">
+      {mobileFiltersOpen && createPortal(
+        <div id="mobile-filters-portal" className="fixed inset-0 z-[9999] md:hidden flex justify-end">
+          <div 
+            className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm transition-opacity" 
+            onClick={() => setMobileFiltersOpen(false)} 
+          />
+          <div className="relative h-full w-[85%] max-w-sm bg-white shadow-2xl border-l border-slate-200 flex flex-col animate-in slide-in-from-right duration-300">
+            <div className="p-5 border-b border-slate-100 flex items-center justify-between bg-white sticky top-0 z-10">
+              <div>
+                <h3 className="text-lg font-bold text-slate-900">Filtros</h3>
+                <p className="text-xs text-slate-500">Personaliza tu vista</p>
+              </div>
+              <button 
+                type="button" 
+                onClick={() => setMobileFiltersOpen(false)} 
+                className="rounded-full p-2 bg-slate-100 text-slate-500 hover:bg-slate-200 transition-colors"
+              >
                 <X className="h-5 w-5" />
               </button>
             </div>
-            <div className="space-y-3">
-              <div className="relative" ref={sucWrapRef}>
-                <button
-                  type="button"
-                  onClick={() => setSucOpen((o) => !o)}
-                  className="w-full flex items-center justify-between gap-2 text-sm font-semibold rounded-xl border border-slate-200 bg-white px-3 py-2.5"
-                >
-                  <span className="truncate text-left">{sucursalButtonLabel}</span>
-                  <ChevronDown className={`w-4 h-4 shrink-0 text-slate-500 transition ${sucOpen ? 'rotate-180' : ''}`} />
-                </button>
+            
+            <div className="flex-1 overflow-y-auto p-5 space-y-6 bg-white">
+              <div className="space-y-3">
+                <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Sucursales</label>
+                <div className="space-y-2">
+                  <div className="flex gap-2">
+                    <button 
+                      type="button" 
+                      onClick={() => selectAllSucursales()} 
+                      className="flex-1 px-3 py-2 text-xs font-bold rounded-lg bg-blue-50 text-blue-700 border border-blue-100"
+                    >
+                      Todas
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedSucursalIds([])}
+                      className="flex-1 px-3 py-2 text-xs font-bold rounded-lg bg-slate-50 text-slate-600 border border-slate-200"
+                    >
+                      Ninguna
+                    </button>
+                  </div>
+                  <div className="rounded-xl border border-slate-200 bg-white divide-y divide-slate-50">
+                    {sucursales.map((s) => (
+                      <label 
+                        key={s.id} 
+                        className="flex items-center gap-3 px-4 py-3 text-sm cursor-pointer active:bg-slate-100 transition-colors"
+                      >
+                        <input 
+                          type="checkbox" 
+                          className="w-5 h-5 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                          checked={selectedSucursalIds.includes(s.id)} 
+                          onChange={() => toggleSucursalId(s.id)} 
+                        />
+                        <span className="text-slate-700 font-medium">{s.nombre.replace(/_/g, ' ')}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
               </div>
-              {sucOpen && (
-                <div className="rounded-xl border border-slate-200 bg-white py-2 max-h-56 overflow-y-auto">
-                  <button type="button" onClick={() => selectAllSucursales()} className="w-full px-3 py-2 text-left text-sm font-semibold">
-                    Seleccionar todas
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setSelectedSucursalIds([])}
-                    className="w-full px-3 py-2 text-left text-sm font-semibold text-slate-600"
-                  >
-                    Limpiar
-                  </button>
-                  {sucursales.map((s) => (
-                    <label key={s.id} className="flex items-center gap-2 px-3 py-2 text-sm">
-                      <input type="checkbox" checked={selectedSucursalIds.includes(s.id)} onChange={() => toggleSucursalId(s.id)} />
-                      <span>{s.nombre.replace(/_/g, ' ')}</span>
-                    </label>
-                  ))}
-                </div>
-              )}
-              <select
-                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700"
-                value={preset}
-                onChange={(e) => setPreset(e.target.value as DatePreset)}
-              >
-                <option value="hoy">Hoy</option>
-                <option value="ayer">Ayer</option>
-                <option value="7d">Últimos 7 días</option>
-                <option value="30d">Últimos 30 días</option>
-                <option value="este_mes">Este mes</option>
-                <option value="personalizado">Personalizado</option>
-              </select>
+
+              <div className="space-y-3">
+                <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Período de tiempo</label>
+                <select
+                  className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-700 outline-none focus:ring-2 focus:ring-blue-500 appearance-none transition-all"
+                  value={preset}
+                  onChange={(e) => setPreset(e.target.value as DatePreset)}
+                >
+                  <option value="hoy">Hoy</option>
+                  <option value="ayer">Ayer</option>
+                  <option value="7d">Últimos 7 días</option>
+                  <option value="30d">Últimos 30 días</option>
+                  <option value="este_mes">Este mes</option>
+                  <option value="personalizado">Personalizado</option>
+                </select>
+              </div>
+
               {preset === 'personalizado' && (
-                <div className="grid grid-cols-1 gap-2">
-                  <input type="date" value={customDesde} onChange={(e) => setCustomDesde(e.target.value)} className="text-sm rounded-xl border border-slate-200 px-3 py-2 font-mono" />
-                  <input type="date" value={customHasta} onChange={(e) => setCustomHasta(e.target.value)} className="text-sm rounded-xl border border-slate-200 px-3 py-2 font-mono" />
+                <div className="grid grid-cols-1 gap-3 animate-in fade-in slide-in-from-top-2">
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-slate-400 ml-1 uppercase">Desde</label>
+                    <input 
+                      type="date" 
+                      value={customDesde} 
+                      onChange={(e) => setCustomDesde(e.target.value)} 
+                      className="w-full text-sm rounded-xl border border-slate-200 px-4 py-3 font-mono bg-slate-50" 
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-slate-400 ml-1 uppercase">Hasta</label>
+                    <input 
+                      type="date" 
+                      value={customHasta} 
+                      onChange={(e) => setCustomHasta(e.target.value)} 
+                      className="w-full text-sm rounded-xl border border-slate-200 px-4 py-3 font-mono bg-slate-50" 
+                    />
+                  </div>
                 </div>
               )}
-              <label
-                className={`flex items-center gap-2 rounded-xl border px-3 py-2 text-sm ${
-                  canDiaOperativo ? 'border-slate-200 bg-white' : 'border-slate-100 bg-slate-50 text-slate-400'
-                }`}
-              >
-                <input
-                  type="checkbox"
-                  checked={diaOperativo}
-                  disabled={!canDiaOperativo}
-                  onChange={(e) => setDiaOperativo(e.target.checked)}
-                />
-                <span className="font-medium">Día operativo</span>
-              </label>
+
+              <div className="space-y-3">
+                <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Ajustes</label>
+                <label
+                  className={`flex items-center justify-between gap-2 rounded-xl border p-4 transition-all ${
+                    canDiaOperativo 
+                      ? 'border-slate-200 bg-white shadow-sm cursor-pointer hover:border-blue-200' 
+                      : 'border-slate-100 bg-slate-50 text-slate-400 opacity-60'
+                  }`}
+                >
+                  <span className="text-sm font-semibold text-slate-700">Día operativo</span>
+                  <div className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      className="sr-only peer"
+                      checked={diaOperativo}
+                      disabled={!canDiaOperativo}
+                      onChange={(e) => setDiaOperativo(e.target.checked)}
+                    />
+                    <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                  </div>
+                </label>
+                {!canDiaOperativo && (
+                  <p className="text-[10px] text-slate-400 leading-tight px-1">
+                    Habilita esta opción configurando el mismo corte en Swiss Admin.
+                  </p>
+                )}
+              </div>
+            </div>
+
+            <div className="p-5 border-t border-slate-100 bg-slate-50 sticky bottom-0">
               <button
                 type="button"
                 onClick={() => {
@@ -302,14 +365,15 @@ export function DashboardTopbar() {
                   setMobileFiltersOpen(false);
                 }}
                 disabled={loading}
-                className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white"
+                className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-slate-900 px-6 py-4 text-base font-bold text-white shadow-lg active:scale-[0.98] transition-all disabled:opacity-50"
               >
-                <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
-                Actualizar
+                <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
+                {loading ? 'Cargando...' : 'Aplicar filtros'}
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </header>
   );
