@@ -456,6 +456,7 @@ def process_historical(
     details_map = _details_map_from_factura2(factura2)
 
     processed_sales: List[dict] = []
+    # Usa FACTURA como checkpoint (es estrictamente secuencial, se genera al cobrar)
     last_key = orden_sort_key(last_orden) if last_orden else -1
     cutoff_date: datetime.date | None = (
         _months_ago(datetime.date.today(), INITIAL_LOAD_MAX_MONTHS_BACK)
@@ -468,8 +469,12 @@ def process_historical(
         if not orden:
             logging.warning("FACTURA1 sin ORDEN — se omite (backend registraria huerfano).")
             continue
-        if last_key >= 0 and orden_sort_key(orden) <= last_key:
-            continue
+        # Filtrar por FACTURA (secuencial) en lugar de ORDEN (no secuencial)
+        factura_num = str(f1item.get("FACTURA", "")).strip()
+        if last_key >= 0:
+            fk = orden_sort_key(factura_num) if factura_num else -1
+            if fk >= 0 and fk <= last_key:
+                continue
         if last_key < 0:
             if cutoff_date is not None:
                 fdate = _parse_dbf_date(f1item.get("FECHA"))
@@ -480,7 +485,8 @@ def process_historical(
         if venta_obj:
             processed_sales.append(venta_obj)
 
-    processed_sales.sort(key=lambda x: orden_sort_key(x["orden"]))
+    # Ordenar por FACTURA para que el checkpoint avance correctamente
+    processed_sales.sort(key=lambda x: orden_sort_key(x.get("factura") or "0"))
     return processed_sales
 
 
@@ -591,8 +597,8 @@ def upload_sync(
             if is_last:
                 turno_filas += int(b.get("turno_actual_filas", 0))
             if checkpoint_path and chunk:
-                top = max(chunk, key=lambda x: orden_sort_key(x["orden"]))
-                save_checkpoint(checkpoint_path, str(orden_sort_key(top["orden"])))
+                top = max(chunk, key=lambda x: orden_sort_key(x.get("factura") or "0"))
+                save_checkpoint(checkpoint_path, str(orden_sort_key(top.get("factura") or "0")))
             if on_chunk:
                 on_chunk(chunk_num, n_chunks)
 

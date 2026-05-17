@@ -2640,44 +2640,41 @@ def sync_last_orden(
     sucursal_password: str | None = Header(None, alias="X-Sucursal-Password"),
 ):
     """
-    Mayor `orden` numérico ya persistido para la sucursal (FACTURA1.ORDEN).
+    Mayor `factura` numérico ya persistido para la sucursal.
+    FACTURA es el consecutivo de cobro (estrictamente secuencial), usado como checkpoint.
     El agente lo usa para alinear el checkpoint local con la nube tras errores o otra PC.
     """
     sucursal = _sync_resolve_sucursal_y_auth(db, sucursal_nombre, sucursal_password, actualizar_last_connection=False)
-    try:
-        mx = (
-            db.query(func.max(cast(models.Venta.orden, BigInteger)))
-            .filter(models.Venta.sucursal_id == sucursal.id)
-            .scalar()
-        )
-    except Exception:
-        db.rollback()
-        dialect = db.get_bind().dialect.name
-        mx = None
-        if dialect == "postgresql":
+    mx = None
+    dialect = db.get_bind().dialect.name
+    if dialect == "postgresql":
+        try:
+            mx = db.execute(
+                text(
+                    """
+                    SELECT MAX(CAST(factura AS BIGINT))
+                    FROM ventas
+                    WHERE sucursal_id = :sid AND factura ~ '^[0-9]+$'
+                    """
+                ),
+                {"sid": sucursal.id},
+            ).scalar()
+        except Exception:
+            db.rollback()
+            mx = None
+    if mx is None:
+        # Fallback: iterar
+        stmt = select(models.Venta.factura).where(models.Venta.sucursal_id == sucursal.id)
+        res = db.execute(stmt)
+        for o in res.scalars().yield_per(4000):
+            s = str(o or "").strip()
+            if not s:
+                continue
             try:
-                mx = db.execute(
-                    text(
-                        """
-                        SELECT MAX(CAST(orden AS BIGINT))
-                        FROM ventas
-                        WHERE sucursal_id = :sid AND orden ~ '^[0-9]+$'
-                        """
-                    ),
-                    {"sid": sucursal.id},
-                ).scalar()
-            except Exception:
-                db.rollback()
-                mx = None
-        if mx is None:
-            stmt = select(models.Venta.orden).where(models.Venta.sucursal_id == sucursal.id)
-            res = db.execute(stmt)
-            for o in res.scalars().yield_per(4000):
-                try:
-                    n = int(str(o).strip())
-                except ValueError:
-                    continue
-                mx = n if mx is None else max(mx, n)
+                n = int(s)
+            except ValueError:
+                continue
+            mx = n if mx is None else max(mx, n)
     if mx is None:
         return {"last_orden": None, "sucursal": sucursal.nombre}
     return {"last_orden": str(int(mx)), "sucursal": sucursal.nombre}
